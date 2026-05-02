@@ -11,6 +11,7 @@ mod net;
 mod overview;
 mod placeholder;
 mod procs;
+mod timeline;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     match app.active {
@@ -24,7 +25,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         TabId::Gpu => placeholder::draw(f, area, "GPU", "nvidia-smi / radeontop / powermetrics"),
         TabId::Power => placeholder::draw(f, area, "Power", "powermetrics / sensors / pmset"),
         TabId::Services => placeholder::draw(f, area, "Services", "systemctl / launchctl"),
-        TabId::Timeline => placeholder::draw(f, area, "Timeline", "session event log + scrubber"),
+        TabId::Timeline => timeline::draw(f, area, app, snap),
         TabId::Insights => insights::draw(f, area, app, snap),
     }
 }

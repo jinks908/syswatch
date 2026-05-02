@@ -82,5 +82,4 @@ pub struct Snapshot {
     pub disk_io: DiskIoTick,
     pub net: Vec<InterfaceTick>,
     pub procs: Vec<ProcTick>,
-    pub live: bool,
 }

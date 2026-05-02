@@ -39,6 +39,10 @@ pub struct History {
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
     pub proc_cpu_ewma: HashMap<u32, f32>,
+    /// Full session: every snapshot pushed in order. Bounded — sized to
+    /// match the metric rings so scrubbing stays in sync. The Timeline tab
+    /// drives scrubbing; other tabs read App::displayed_snap().
+    pub session: Ring<Snapshot>,
 }
 
 impl History {
@@ -50,10 +54,13 @@ impl History {
             net_rate: Ring::new(cap),
             io_rate: Ring::new(cap),
             proc_cpu_ewma: HashMap::new(),
+            session: Ring::new(cap),
         }
     }
 
     fn push(&mut self, snap: &Snapshot) {
+        // Mirror the snapshot into the session ring so scrubbing has full data.
+        self.session.push(snap.clone());
         self.cpu.push(snap.cpu.usage_pct);
         let m = if snap.mem.total_bytes > 0 {
             (snap.mem.used_bytes as f32) / (snap.mem.total_bytes as f32)
@@ -188,6 +195,13 @@ impl ProcSort {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveState {
+    Live,
+    Paused,
+    Scrub,
+}
+
 pub struct App {
     pub active: TabId,
     pub paused: bool,
@@ -196,6 +210,29 @@ pub struct App {
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
     pub insights: Vec<Insight>,
+    /// Scrub offset in ticks back from "now" (0 = live). Driven by Timeline's
+    /// arrow keys; clamped to session length. Affects every tab via
+    /// App::displayed_snap.
+    pub scrub_offset: usize,
+}
+
+impl App {
+    pub fn displayed_snap(&self) -> Option<&Snapshot> {
+        if self.scrub_offset > 0 {
+            self.history.session.nth_back(self.scrub_offset)
+        } else {
+            self.snap.as_ref()
+        }
+    }
+    pub fn live_state(&self) -> LiveState {
+        if self.scrub_offset > 0 {
+            LiveState::Scrub
+        } else if self.paused {
+            LiveState::Paused
+        } else {
+            LiveState::Live
+        }
+    }
 }
 
 impl App {
@@ -208,6 +245,7 @@ impl App {
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
             insights: Vec::new(),
+            scrub_offset: 0,
         }
     }
 
@@ -248,6 +286,20 @@ impl App {
                 self.proc_sort = self.proc_sort.next();
                 self.proc_sel = 0;
             }
+            // Scrub controls: active on every tab, but most useful on Timeline.
+            (KeyCode::Left, _) => {
+                let max = self.history.session.len().saturating_sub(1);
+                self.scrub_offset = (self.scrub_offset + 1).min(max);
+            }
+            (KeyCode::Right, _) => {
+                self.scrub_offset = self.scrub_offset.saturating_sub(1);
+            }
+            (KeyCode::Home, _) => {
+                self.scrub_offset = self.history.session.len().saturating_sub(1);
+            }
+            (KeyCode::End, _) => {
+                self.scrub_offset = 0;
+            }
             _ => {}
         }
         false
@@ -287,16 +339,12 @@ pub fn run(opts: Options) -> Result<()> {
                 let s = collector.sample();
                 app.history.push(&s);
                 app.insights = insights::compute(&app.history, &s);
-                let mut s = s;
-                s.live = !app.paused;
                 app.snap = Some(s);
-            } else if let Some(snap) = app.snap.as_mut() {
-                snap.live = false;
             }
             last_tick = Instant::now();
         }
 
-        if let Some(snap) = &app.snap {
+        if let Some(snap) = app.displayed_snap() {
             term.draw(|f| draw(f, &app, snap))?;
         }
 
@@ -335,7 +383,7 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
         ])
         .split(area);
 
-    chrome::draw_header(f, chunks[0], snap);
+    chrome::draw_header(f, chunks[0], snap, app.live_state());
     let active_insights = app
         .insights
         .iter()

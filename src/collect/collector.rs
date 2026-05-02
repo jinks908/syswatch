@@ -103,7 +103,6 @@ impl Collector {
             disk_io,
             net,
             procs,
-            live: true,
         }
     }
 

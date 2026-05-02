@@ -6,10 +6,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{Snapshot, TabId, ALL_TABS};
+use crate::app::{LiveState, Snapshot, TabId, ALL_TABS};
 use crate::ui::palette as p;
 
-pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot) {
+pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(" \u{25cf}", Style::default().fg(p::GREEN)));
     spans.push(Span::styled(
@@ -36,9 +36,13 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot) {
         Style::default().fg(p::FG),
     ));
 
-    let now = chrono::Local::now().format("%H:%M:%S").to_string();
-    let right = format!("\u{25cf} {}  {}", if snap.live { "LIVE" } else { "PAUSE" }, now);
-    let right_color = if snap.live { p::GREEN } else { p::YELLOW };
+    let (label, right_color) = match live {
+        LiveState::Live => ("LIVE", p::GREEN),
+        LiveState::Paused => ("PAUSE", p::YELLOW),
+        LiveState::Scrub => ("SCRUB", p::CYAN),
+    };
+    let ts: chrono::DateTime<chrono::Local> = snap.t.into();
+    let right = format!("\u{25cf} {}  {}", label, ts.format("%H:%M:%S"));
 
     // Two paragraphs: left fills, right is a separate one-row area on the right edge.
     let right_w = right.chars().count() as u16 + 1;

@@ -29,6 +29,14 @@ impl<T: Clone> Ring<T> {
     pub fn last(&self) -> Option<&T> {
         self.inner.back()
     }
+    /// Get the nth element counting back from the most recent (0 = newest).
+    pub fn nth_back(&self, n: usize) -> Option<&T> {
+        let len = self.inner.len();
+        if n >= len {
+            return None;
+        }
+        self.inner.get(len - 1 - n)
+    }
     pub fn to_vec(&self) -> Vec<T> {
         self.inner.iter().cloned().collect()
     }
