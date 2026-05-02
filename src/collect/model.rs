@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HostInfo {
     pub hostname: String,
     pub os: String,
@@ -191,4 +191,22 @@ pub struct Snapshot {
     pub gpus: Vec<GpuTick>,
     pub power: PowerTick,
     pub services: Vec<ServiceTick>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            t: SystemTime::UNIX_EPOCH,
+            host: HostInfo::default(),
+            cpu: CpuTick::default(),
+            mem: MemTick::default(),
+            disks: Vec::new(),
+            disk_io: DiskIoTick::default(),
+            net: Vec::new(),
+            procs: Vec::new(),
+            gpus: Vec::new(),
+            power: PowerTick::default(),
+            services: Vec::new(),
+        }
+    }
 }

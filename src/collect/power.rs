@@ -260,7 +260,7 @@ fn parse_macos_pmset_throttle(text: &str) -> u32 {
     100
 }
 
-#[cfg(target_os = "linux")]
+// Pure file-IO over a &Path — exercisable on any host via tempfile fixtures.
 fn parse_linux_battery(path: &std::path::Path) -> BatteryTick {
     let mut bat = BatteryTick::default();
     bat.charge_pct = read_trim(&path.join("capacity"))
@@ -290,7 +290,6 @@ fn parse_linux_battery(path: &std::path::Path) -> BatteryTick {
     bat
 }
 
-#[cfg(target_os = "linux")]
 fn derive_linux_power_w(path: &std::path::Path) -> Option<f32> {
     // power_now is in microwatts; voltage*current is the fallback.
     if let Some(uw) = read_trim(&path.join("power_now")).and_then(|s| s.parse::<f32>().ok()) {
@@ -301,7 +300,6 @@ fn derive_linux_power_w(path: &std::path::Path) -> Option<f32> {
     Some(v_uv * c_ua.abs() / 1e12)
 }
 
-#[cfg(target_os = "linux")]
 fn read_trim(p: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(p)
         .ok()
@@ -357,5 +355,95 @@ mod tests {
         let throttled =
             "CPU_Scheduler_Limit \t= 100\nCPU_Available_CPUs \t= 14\nCPU_Speed_Limit \t= 87";
         assert_eq!(parse_macos_pmset_throttle(throttled), 87);
+    }
+
+    // ── Linux sysfs parsers ── exercised on any host via tempfile ──────────
+
+    fn write_field(dir: &std::path::Path, name: &str, value: &str) {
+        std::fs::write(dir.join(name), value).unwrap();
+    }
+
+    #[test]
+    fn linux_battery_basic_charging() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        write_field(p, "capacity", "73");
+        write_field(p, "status", "Charging");
+        write_field(p, "cycle_count", "127");
+        write_field(p, "voltage_now", "12500000"); // 12.5 V (µV)
+        write_field(p, "current_now", "1500000"); // 1.5 A (µA)
+        write_field(p, "temp", "315"); // 31.5 °C (deci-C)
+        write_field(p, "energy_full_design", "60000000");
+        write_field(p, "energy_full", "57000000"); // 95% health
+
+        let bat = parse_linux_battery(p);
+        assert_eq!(bat.charge_pct as i32, 73);
+        assert!(bat.is_charging);
+        assert!(!bat.fully_charged);
+        assert_eq!(bat.cycle_count, Some(127));
+        assert!((bat.voltage_v.unwrap() - 12.5).abs() < 1e-3);
+        assert_eq!(bat.amperage_ma, Some(1500));
+        assert!((bat.temp_c.unwrap() - 31.5).abs() < 1e-3);
+        assert!((bat.health_pct.unwrap() - 95.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linux_battery_full_status() {
+        let dir = tempfile::tempdir().unwrap();
+        write_field(dir.path(), "capacity", "100");
+        write_field(dir.path(), "status", "Full");
+        let bat = parse_linux_battery(dir.path());
+        assert_eq!(bat.charge_pct as i32, 100);
+        assert!(bat.fully_charged);
+        assert!(!bat.is_charging);
+    }
+
+    #[test]
+    fn linux_battery_missing_files_yield_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let bat = parse_linux_battery(dir.path());
+        assert_eq!(bat.charge_pct, 0.0);
+        assert!(!bat.is_charging);
+        assert_eq!(bat.cycle_count, None);
+        assert_eq!(bat.voltage_v, None);
+        assert_eq!(bat.health_pct, None);
+    }
+
+    #[test]
+    fn linux_power_w_prefers_power_now_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_field(dir.path(), "power_now", "12500000"); // 12.5 W (µW)
+                                                          // Voltage/current would derive 60W — power_now wins.
+        write_field(dir.path(), "voltage_now", "12000000");
+        write_field(dir.path(), "current_now", "5000000");
+        let w = derive_linux_power_w(dir.path()).unwrap();
+        assert!((w - 12.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linux_power_w_falls_back_to_voltage_x_current() {
+        let dir = tempfile::tempdir().unwrap();
+        write_field(dir.path(), "voltage_now", "12000000"); // 12 V
+        write_field(dir.path(), "current_now", "1500000"); // 1.5 A
+        let w = derive_linux_power_w(dir.path()).unwrap();
+        // 12 V * 1.5 A = 18 W
+        assert!((w - 18.0).abs() < 1e-2, "expected ≈18 W, got {}", w);
+    }
+
+    #[test]
+    fn linux_power_w_none_without_data() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(derive_linux_power_w(dir.path()), None);
+    }
+
+    #[test]
+    fn linux_health_clamps_to_100() {
+        let dir = tempfile::tempdir().unwrap();
+        // Fresh battery sometimes reads as overprovisioned; clamp protects the UI.
+        write_field(dir.path(), "capacity", "100");
+        write_field(dir.path(), "energy_full_design", "50000");
+        write_field(dir.path(), "energy_full", "55000"); // 110% raw
+        let bat = parse_linux_battery(dir.path());
+        assert_eq!(bat.health_pct, Some(100.0));
     }
 }

@@ -40,6 +40,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # in this Cargo.toml — keep it out of commits.
 netwatch-sdk = "0.1"
 
+[dev-dependencies]
+# tempfile lets the Linux power/gpu parsers be exercised on any host by
+# constructing a tempdir-shaped sysfs view. Same pattern netwatch-sdk uses.
+tempfile = "3"
+
 [features]
 default = []
 gpu-nvidia = []

@@ -257,3 +257,86 @@ fn fill(width: usize, used: &str) -> String {
 fn header_style() -> Style {
     Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn p(pid: u32, name: &str, cpu: f32, rss: u64, io: f64, secs: u64) -> ProcTick {
+        ProcTick {
+            pid,
+            ppid: 1,
+            user: "u".into(),
+            name: name.into(),
+            cmd: name.into(),
+            cpu_pct: cpu,
+            mem_rss: rss,
+            mem_virt: 0,
+            threads: 1,
+            state: 'S',
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+            io_rate: io,
+        }
+    }
+
+    fn names(v: &[ProcTick]) -> Vec<&str> {
+        v.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    fn fixture() -> Vec<ProcTick> {
+        vec![
+            p(1, "alpha", 5.0, 100, 10.0, 1000),
+            p(2, "Bravo", 90.0, 50, 5000.0, 2000),
+            p(3, "charlie", 30.0, 9999, 0.0, 500),
+            p(4, "delta", 0.5, 200, 20.0, 3000), // newest start
+        ]
+    }
+
+    #[test]
+    fn sort_by_cpu_descending() {
+        let s = sort_procs(&fixture(), ProcSort::Cpu);
+        assert_eq!(names(&s), vec!["Bravo", "charlie", "alpha", "delta"]);
+    }
+
+    #[test]
+    fn sort_by_rss_descending() {
+        let s = sort_procs(&fixture(), ProcSort::Rss);
+        assert_eq!(names(&s), vec!["charlie", "delta", "alpha", "Bravo"]);
+    }
+
+    #[test]
+    fn sort_by_io_descending() {
+        let s = sort_procs(&fixture(), ProcSort::Io);
+        assert_eq!(names(&s), vec!["Bravo", "delta", "alpha", "charlie"]);
+    }
+
+    #[test]
+    fn sort_by_start_newest_first() {
+        let s = sort_procs(&fixture(), ProcSort::Start);
+        // delta=3000, bravo=2000, alpha=1000, charlie=500
+        assert_eq!(names(&s), vec!["delta", "Bravo", "alpha", "charlie"]);
+    }
+
+    #[test]
+    fn sort_by_name_case_insensitive_ascending() {
+        let s = sort_procs(&fixture(), ProcSort::Name);
+        // Bravo < alpha lexically (uppercase B < lowercase a) but our sort
+        // lowercases first, so the right order is alpha, Bravo, charlie, delta.
+        assert_eq!(names(&s), vec!["alpha", "Bravo", "charlie", "delta"]);
+    }
+
+    #[test]
+    fn sort_empty_is_empty() {
+        assert!(sort_procs(&[], ProcSort::Cpu).is_empty());
+        assert!(sort_procs(&[], ProcSort::Name).is_empty());
+    }
+
+    #[test]
+    fn sort_does_not_mutate_input() {
+        let input = fixture();
+        let original_first = input[0].name.clone();
+        let _ = sort_procs(&input, ProcSort::Cpu);
+        assert_eq!(input[0].name, original_first);
+    }
+}

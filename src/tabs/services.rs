@@ -262,3 +262,94 @@ fn fill_remainder(width: usize, used: &str) -> String {
 fn header_style() -> Style {
     Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(name: &str, status: ServiceStatus, pid: Option<u32>) -> ServiceTick {
+        ServiceTick {
+            name: name.into(),
+            status,
+            pid,
+            exit_code: None,
+            detail: String::new(),
+        }
+    }
+
+    fn names(v: &[ServiceTick]) -> Vec<&str> {
+        v.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    fn fixture() -> Vec<ServiceTick> {
+        vec![
+            s("zeta.service", ServiceStatus::Idle, None),
+            s("alpha.service", ServiceStatus::Failed, None),
+            s("beta.service", ServiceStatus::Running, Some(42)),
+            s("gamma.service", ServiceStatus::Running, Some(7)),
+            s("delta.service", ServiceStatus::Unknown, None),
+        ]
+    }
+
+    #[test]
+    fn sort_by_name_ascending() {
+        let out = sort_services(&fixture(), ServiceSort::Name);
+        assert_eq!(
+            names(&out),
+            vec![
+                "alpha.service",
+                "beta.service",
+                "delta.service",
+                "gamma.service",
+                "zeta.service",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_by_status_failed_first_then_running() {
+        let out = sort_services(&fixture(), ServiceSort::Status);
+        // Order: Failed, Running (name-tiebreak), Idle, Unknown.
+        assert_eq!(
+            names(&out),
+            vec![
+                "alpha.service", // Failed
+                "beta.service",  // Running
+                "gamma.service", // Running
+                "zeta.service",  // Idle
+                "delta.service", // Unknown
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_by_pid_ascending_with_unset_last() {
+        let out = sort_services(&fixture(), ServiceSort::Pid);
+        // Some(7), Some(42), then None entries fall back to name order.
+        assert_eq!(
+            names(&out),
+            vec![
+                "gamma.service", // pid 7
+                "beta.service",  // pid 42
+                "alpha.service", // None — alphabetic
+                "delta.service",
+                "zeta.service",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_empty_is_empty() {
+        assert!(sort_services(&[], ServiceSort::Name).is_empty());
+        assert!(sort_services(&[], ServiceSort::Status).is_empty());
+    }
+
+    #[test]
+    fn counts_partition_correctly() {
+        let (r, i, f, u) = counts(&fixture());
+        assert_eq!(r, 2);
+        assert_eq!(i, 1);
+        assert_eq!(f, 1);
+        assert_eq!(u, 1);
+    }
+}

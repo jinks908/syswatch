@@ -46,7 +46,7 @@ pub struct History {
 }
 
 impl History {
-    fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             cpu: Ring::new(cap),
             mem: Ring::new(cap),
@@ -58,7 +58,7 @@ impl History {
         }
     }
 
-    fn push(&mut self, snap: &Snapshot) {
+    pub(crate) fn push(&mut self, snap: &Snapshot) {
         // Mirror the snapshot into the session ring so scrubbing has full data.
         self.session.push(snap.clone());
         self.cpu.push(snap.cpu.usage_pct);
@@ -452,4 +452,83 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
     };
     tabs::draw(f, body, app, snap);
     chrome::draw_footer(f, chunks[3]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collect::ProcTick;
+
+    fn proc(pid: u32, cpu: f32) -> ProcTick {
+        ProcTick {
+            pid,
+            cpu_pct: cpu,
+            ..Default::default()
+        }
+    }
+
+    fn snap_with(procs: Vec<ProcTick>) -> Snapshot {
+        Snapshot {
+            procs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ewma_first_observation_is_value_itself() {
+        let mut h = History::new(10);
+        h.push(&snap_with(vec![proc(42, 80.0)]));
+        // No prior reading → ewma = 0.7 * value + 0.3 * value = value.
+        assert_eq!(h.proc_cpu_ewma.get(&42).copied(), Some(80.0));
+    }
+
+    #[test]
+    fn ewma_converges_to_steady_state() {
+        let mut h = History::new(20);
+        // Stable signal at 100% over many ticks should pull EWMA toward 100.
+        for _ in 0..15 {
+            h.push(&snap_with(vec![proc(1, 100.0)]));
+        }
+        let v = h.proc_cpu_ewma.get(&1).copied().unwrap();
+        assert!((v - 100.0).abs() < 0.01, "expected ≈100, got {}", v);
+    }
+
+    #[test]
+    fn ewma_smooths_a_spike() {
+        let mut h = History::new(20);
+        for _ in 0..5 {
+            h.push(&snap_with(vec![proc(1, 0.0)]));
+        }
+        // One transient spike to 100%.
+        h.push(&snap_with(vec![proc(1, 100.0)]));
+        let v = h.proc_cpu_ewma.get(&1).copied().unwrap();
+        // Should be much less than 100 — the spike doesn't dominate.
+        assert!(v > 20.0 && v < 50.0, "expected ~30, got {}", v);
+    }
+
+    #[test]
+    fn ewma_prunes_pids_absent_from_latest_snapshot() {
+        let mut h = History::new(10);
+        h.push(&snap_with(vec![proc(1, 50.0), proc(2, 50.0)]));
+        assert!(h.proc_cpu_ewma.contains_key(&1));
+        assert!(h.proc_cpu_ewma.contains_key(&2));
+
+        // pid 2 disappears.
+        h.push(&snap_with(vec![proc(1, 50.0)]));
+        assert!(h.proc_cpu_ewma.contains_key(&1));
+        assert!(!h.proc_cpu_ewma.contains_key(&2));
+    }
+
+    #[test]
+    fn session_mirrors_snapshots_into_ring() {
+        let mut h = History::new(3);
+        for cpu in [10.0, 20.0, 30.0, 40.0_f32] {
+            h.push(&snap_with(vec![proc(1, cpu)]));
+        }
+        // Cap=3 → drops the oldest (10.0).
+        let session = h.session.to_vec();
+        assert_eq!(session.len(), 3);
+        assert_eq!(session[0].procs[0].cpu_pct, 20.0);
+        assert_eq!(session[2].procs[0].cpu_pct, 40.0);
+    }
 }

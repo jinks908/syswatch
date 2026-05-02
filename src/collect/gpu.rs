@@ -70,12 +70,7 @@ fn discover() -> Vec<GpuTick> {
             let vendor = d
                 .get("spdisplays_vendor")
                 .and_then(|v| v.as_str())
-                .map(|s| {
-                    s.strip_prefix("sppci_vendor_")
-                        .unwrap_or(s)
-                        .trim_start_matches("0x")
-                        .to_string()
-                })
+                .map(strip_macos_vendor_key)
                 .unwrap_or_else(|| "Apple".into());
             let vram = d
                 .get("spdisplays_vram_shared")
@@ -177,4 +172,70 @@ fn parse_vram_string(s: &str) -> Option<u64> {
         _ => 1,
     };
     Some((n * mult as f64) as u64)
+}
+
+/// Strip macOS SPDisplays localization-key prefixes ("sppci_vendor_Apple" →
+/// "Apple", "0x10de" → "10de"). Pulled out so it's testable without spawning
+/// `system_profiler`.
+#[cfg(target_os = "macos")]
+fn strip_macos_vendor_key(s: &str) -> String {
+    s.strip_prefix("sppci_vendor_")
+        .unwrap_or(s)
+        .trim_start_matches("0x")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "macos")]
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vram_string_handles_units() {
+        assert_eq!(parse_vram_string("16 GB"), Some(16 * 1024 * 1024 * 1024));
+        assert_eq!(parse_vram_string("8192 MB"), Some(8192 * 1024 * 1024));
+        assert_eq!(parse_vram_string("512 KB"), Some(512 * 1024));
+        // Lowercase units are folded.
+        assert_eq!(parse_vram_string("4 gb"), Some(4 * 1024 * 1024 * 1024));
+        // Decimals.
+        assert_eq!(
+            parse_vram_string("1.5 GB"),
+            Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vram_string_no_unit_treated_as_bytes() {
+        assert_eq!(parse_vram_string("1024"), Some(1024));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vram_string_garbage_returns_none() {
+        assert_eq!(parse_vram_string(""), None);
+        assert_eq!(parse_vram_string("not a number"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn strips_sppci_vendor_prefix() {
+        assert_eq!(strip_macos_vendor_key("sppci_vendor_Apple"), "Apple");
+        assert_eq!(strip_macos_vendor_key("sppci_vendor_AMD"), "AMD");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn strips_hex_vendor_id() {
+        assert_eq!(strip_macos_vendor_key("0x10de"), "10de");
+        assert_eq!(strip_macos_vendor_key("0x1002"), "1002");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn passes_through_unknown_format() {
+        assert_eq!(strip_macos_vendor_key("Apple"), "Apple");
+        assert_eq!(strip_macos_vendor_key("NVIDIA Corp"), "NVIDIA Corp");
+    }
 }

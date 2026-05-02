@@ -324,3 +324,377 @@ fn insight_zombie_party(snap: &Snapshot) -> Option<Insight> {
 fn fmt_bytes(b: u64) -> String {
     crate::ui::widgets::human_bytes(b)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collect::{DiskUsageTick, MemTick, ProcTick, Snapshot};
+
+    // ── Fixture builders ──────────────────────────────────────────────────
+
+    fn proc(pid: u32, name: &str, cpu: f32, rss: u64, state: char) -> ProcTick {
+        ProcTick {
+            pid,
+            name: name.into(),
+            cpu_pct: cpu,
+            mem_rss: rss,
+            state,
+            ..Default::default()
+        }
+    }
+
+    fn snap(mem: MemTick, procs: Vec<ProcTick>, disks: Vec<DiskUsageTick>) -> Snapshot {
+        Snapshot {
+            mem,
+            procs,
+            disks,
+            ..Default::default()
+        }
+    }
+
+    fn mem(used: u64, total: u64, swap_used: u64, swap_total: u64) -> MemTick {
+        MemTick {
+            total_bytes: total,
+            used_bytes: used,
+            available_bytes: total.saturating_sub(used),
+            swap_total_bytes: swap_total,
+            swap_used_bytes: swap_used,
+        }
+    }
+
+    fn cpu(load_1: f32, cores: usize) -> crate::collect::CpuTick {
+        crate::collect::CpuTick {
+            load_1,
+            load_5: load_1,
+            load_15: load_1,
+            usage_pct: 0.0,
+            per_core: vec![0.0; cores],
+        }
+    }
+
+    fn disk(mount: &str, used_pct: f32) -> DiskUsageTick {
+        DiskUsageTick {
+            mount_point: mount.into(),
+            device: format!("/dev/{}", mount),
+            fs_type: "ext4".into(),
+            total_bytes: 100 * GIB,
+            used_bytes: ((used_pct / 100.0) * 100.0 * GIB as f32) as u64,
+            available_bytes: ((1.0 - used_pct / 100.0) * 100.0 * GIB as f32) as u64,
+            usage_pct: used_pct,
+        }
+    }
+
+    fn empty_history() -> History {
+        // Minimum cap that satisfies all heuristics' window checks.
+        let mut h = History::new(60);
+        let _ = &mut h;
+        h
+    }
+
+    fn first_with(insights: &[Insight], needle: &str) -> Option<Insight> {
+        insights.iter().find(|i| i.title.contains(needle)).cloned()
+    }
+
+    // ── swap_thrash ───────────────────────────────────────────────────────
+
+    #[test]
+    fn swap_thrash_does_not_fire_below_threshold() {
+        let mut h = empty_history();
+        // Push 30 ticks of stable swap usage at 200 MIB.
+        for _ in 0..30 {
+            h.push(&snap(mem(0, 16 * GIB, 200 * MIB, 4 * GIB), vec![], vec![]));
+        }
+        let s = snap(mem(0, 16 * GIB, 200 * MIB, 4 * GIB), vec![], vec![]);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "swap").is_none());
+    }
+
+    #[test]
+    fn swap_thrash_fires_warn_on_growth() {
+        let mut h = empty_history();
+        // 30 ticks at 100 MiB, then jump to 350 MiB (+250 MiB, > warn).
+        for _ in 0..30 {
+            h.push(&snap(mem(0, 16 * GIB, 100 * MIB, 4 * GIB), vec![], vec![]));
+        }
+        let final_swap = 350 * MIB;
+        h.push(&snap(mem(0, 16 * GIB, final_swap, 4 * GIB), vec![], vec![]));
+        let s = snap(mem(0, 16 * GIB, final_swap, 4 * GIB), vec![], vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "swap").expect("swap insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn swap_thrash_fires_crit_on_huge_growth() {
+        let mut h = empty_history();
+        for _ in 0..30 {
+            h.push(&snap(mem(0, 16 * GIB, 100 * MIB, 4 * GIB), vec![], vec![]));
+        }
+        let final_swap = 700 * MIB; // +600 MiB > crit threshold (512)
+        h.push(&snap(mem(0, 16 * GIB, final_swap, 4 * GIB), vec![], vec![]));
+        let s = snap(mem(0, 16 * GIB, final_swap, 4 * GIB), vec![], vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "swap").expect("swap insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── runaway_proc (uses History::proc_cpu_ewma) ────────────────────────
+
+    #[test]
+    fn runaway_proc_does_not_fire_for_transient_spike() {
+        let mut h = empty_history();
+        // Quiet history then one spiking sample → EWMA still low.
+        for _ in 0..10 {
+            h.push(&snap(
+                MemTick::default(),
+                vec![proc(42, "calm", 5.0, 0, 'S')],
+                vec![],
+            ));
+        }
+        h.push(&snap(
+            MemTick::default(),
+            vec![proc(42, "calm", 95.0, 0, 'S')],
+            vec![],
+        ));
+        let s = snap(
+            MemTick::default(),
+            vec![proc(42, "calm", 95.0, 0, 'S')],
+            vec![],
+        );
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "runaway").is_none());
+    }
+
+    #[test]
+    fn runaway_proc_fires_warn_when_sustained() {
+        let mut h = empty_history();
+        // Sustained 70% CPU pulls EWMA above the 50% warn line.
+        for _ in 0..15 {
+            h.push(&snap(
+                MemTick::default(),
+                vec![proc(42, "rustc", 70.0, 0, 'R')],
+                vec![],
+            ));
+        }
+        let s = snap(
+            MemTick::default(),
+            vec![proc(42, "rustc", 70.0, 0, 'R')],
+            vec![],
+        );
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "runaway").expect("runaway insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+        assert!(ins.title.contains("rustc"));
+    }
+
+    #[test]
+    fn runaway_proc_fires_crit_at_sustained_95pct() {
+        let mut h = empty_history();
+        for _ in 0..15 {
+            h.push(&snap(
+                MemTick::default(),
+                vec![proc(42, "rustc", 99.0, 0, 'R')],
+                vec![],
+            ));
+        }
+        let s = snap(
+            MemTick::default(),
+            vec![proc(42, "rustc", 99.0, 0, 'R')],
+            vec![],
+        );
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "runaway").expect("runaway insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── disk_full ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn disk_full_does_not_fire_below_85pct() {
+        let h = empty_history();
+        let s = snap(MemTick::default(), vec![], vec![disk("/", 80.0)]);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "full").is_none());
+    }
+
+    #[test]
+    fn disk_full_fires_warn_at_85pct() {
+        let h = empty_history();
+        let s = snap(MemTick::default(), vec![], vec![disk("/", 88.0)]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "full").expect("disk full insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+        assert_eq!(ins.suggested_tab, TabId::Fs);
+    }
+
+    #[test]
+    fn disk_full_fires_crit_at_95pct() {
+        let h = empty_history();
+        let s = snap(MemTick::default(), vec![], vec![disk("/", 96.5)]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "full").expect("disk full insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── memory_pressure ──────────────────────────────────────────────────
+
+    #[test]
+    fn memory_pressure_does_not_fire_at_normal_load() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap(mem(8 * GIB, 16 * GIB, 0, 0), vec![], vec![]));
+        }
+        let s = snap(mem(8 * GIB, 16 * GIB, 0, 0), vec![], vec![]);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "memory pressure").is_none());
+    }
+
+    #[test]
+    fn memory_pressure_fires_warn_at_85pct_sustained() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap(
+                mem(15 * GIB - 200 * MIB, 16 * GIB, 0, 0),
+                vec![],
+                vec![],
+            ));
+        }
+        let s = snap(mem(15 * GIB - 200 * MIB, 16 * GIB, 0, 0), vec![], vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "memory pressure").expect("memory pressure expected");
+        assert_eq!(ins.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn memory_pressure_fires_crit_at_95pct() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap(mem(155 * GIB / 10, 16 * GIB, 0, 0), vec![], vec![]));
+        }
+        let s = snap(mem(155 * GIB / 10, 16 * GIB, 0, 0), vec![], vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "memory pressure").expect("memory pressure expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── high_load ────────────────────────────────────────────────────────
+
+    #[test]
+    fn high_load_does_not_fire_under_warn_threshold() {
+        let h = empty_history();
+        let mut s = Snapshot::default();
+        s.cpu = cpu(7.0, 8); // 7 < 8 * 1.5 = 12 → quiet
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "load").is_none());
+    }
+
+    #[test]
+    fn high_load_fires_warn_at_2x_cores() {
+        let h = empty_history();
+        let mut s = Snapshot::default();
+        s.cpu = cpu(20.0, 8); // 20 > 8 * 2 = 16
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "load").expect("high-load insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn high_load_fires_crit_at_4x_cores() {
+        let h = empty_history();
+        let mut s = Snapshot::default();
+        s.cpu = cpu(40.0, 8); // 40 > 8 * 4 = 32
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "load").expect("high-load insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── zombie_party ──────────────────────────────────────────────────────
+
+    #[test]
+    fn zombie_party_does_not_fire_below_5() {
+        let h = empty_history();
+        let procs = (0..4).map(|i| proc(i, "z", 0.0, 0, 'Z')).collect();
+        let s = snap(MemTick::default(), procs, vec![]);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "zombie").is_none());
+    }
+
+    #[test]
+    fn zombie_party_fires_warn_at_5_zombies() {
+        let h = empty_history();
+        let procs = (0..7).map(|i| proc(i, "z", 0.0, 0, 'Z')).collect();
+        let s = snap(MemTick::default(), procs, vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "zombie").expect("zombie insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn zombie_party_fires_crit_at_25_plus() {
+        let h = empty_history();
+        let procs = (0..30).map(|i| proc(i, "z", 0.0, 0, 'Z')).collect();
+        let s = snap(MemTick::default(), procs, vec![]);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "zombie").expect("zombie insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── compute() ordering / capping ──────────────────────────────────────
+
+    #[test]
+    fn compute_sorts_crit_before_warn() {
+        let mut h = empty_history();
+        // Build a state that triggers WARN swap_thrash AND CRIT disk_full.
+        for _ in 0..30 {
+            h.push(&snap(mem(0, 16 * GIB, 100 * MIB, 4 * GIB), vec![], vec![]));
+        }
+        let final_swap = 350 * MIB;
+        h.push(&snap(mem(0, 16 * GIB, final_swap, 4 * GIB), vec![], vec![]));
+        let s = snap(
+            mem(0, 16 * GIB, final_swap, 4 * GIB),
+            vec![],
+            vec![disk("/", 96.0)],
+        );
+        let result = compute(&h, &s);
+        assert!(result.len() >= 2);
+        assert_eq!(result[0].severity, Severity::Crit);
+        // Subsequent items are <= the first.
+        for w in result.windows(2) {
+            assert!(w[0].severity >= w[1].severity);
+        }
+    }
+
+    #[test]
+    fn compute_caps_at_six_cards() {
+        // Construct a Snapshot that lights up every heuristic.
+        let mut h = empty_history();
+        for _ in 0..30 {
+            h.push(&snap(
+                mem(15 * GIB, 16 * GIB, 100 * MIB, 4 * GIB),
+                vec![proc(42, "rustc", 95.0, 0, 'R')],
+                vec![],
+            ));
+        }
+        let final_swap = 700 * MIB;
+        let zombies: Vec<ProcTick> = (0..30).map(|i| proc(100 + i, "z", 0.0, 0, 'Z')).collect();
+        let mut all_procs = vec![proc(42, "rustc", 95.0, 0, 'R')];
+        all_procs.extend(zombies);
+        h.push(&snap(
+            mem(15 * GIB, 16 * GIB, final_swap, 4 * GIB),
+            all_procs.clone(),
+            vec![],
+        ));
+        let mut s = snap(
+            mem(15 * GIB, 16 * GIB, final_swap, 4 * GIB),
+            all_procs,
+            vec![disk("/", 96.0), disk("/data", 99.0)],
+        );
+        s.cpu = cpu(40.0, 8);
+        let result = compute(&h, &s);
+        assert!(
+            result.len() <= 6,
+            "should cap at 6 cards, got {}",
+            result.len()
+        );
+    }
+}
