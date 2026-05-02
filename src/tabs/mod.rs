@@ -5,6 +5,7 @@ use crate::app::{App, Snapshot, TabId};
 mod cpu;
 mod disks;
 mod fs;
+mod insights;
 mod memory;
 mod net;
 mod overview;
@@ -24,6 +25,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         TabId::Power => placeholder::draw(f, area, "Power", "powermetrics / sensors / pmset"),
         TabId::Services => placeholder::draw(f, area, "Services", "systemctl / launchctl"),
         TabId::Timeline => placeholder::draw(f, area, "Timeline", "session event log + scrubber"),
-        TabId::Insights => placeholder::draw(f, area, "Insights", "plain-English anomaly cards"),
+        TabId::Insights => insights::draw(f, area, app, snap),
     }
 }

@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod app;
 mod collect;
+mod insights;
 mod tabs;
 mod ui;
 

@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Snapshot};
+use crate::insights::Severity;
 use crate::ui::{
     palette as p,
     widgets::{block_bar, human_bytes, human_rate, panel, sparkline},
@@ -24,7 +25,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 
     draw_kpi_strip(f, v[0], app, snap);
     draw_middle(f, v[1], app, snap);
-    draw_insights_strip(f, v[2]);
+    draw_insights_strip(f, v[2], app);
 }
 
 fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -256,22 +257,65 @@ fn draw_top_procs(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(table, inner);
 }
 
-fn draw_insights_strip(f: &mut Frame, area: Rect) {
-    let block = panel("Insights");
+fn draw_insights_strip(f: &mut Frame, area: Rect, app: &App) {
+    let active = app
+        .insights
+        .iter()
+        .filter(|i| i.severity != Severity::Info)
+        .count();
+    let title = if active == 0 {
+        "Insights — system nominal".to_string()
+    } else {
+        format!("Insights — {} active (press [+] for detail)", active)
+    };
+    let block = panel(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let p_ = Paragraph::new(vec![
-        Line::from(vec![Span::styled(
-            "Insights engine pending — see [+] tab.",
-            Style::default().fg(p::DIM),
-        )]),
-        Line::from(vec![Span::styled(
-            "v0.1 will surface: swap thrash, runaway proc, thermal throttle, OOM kills.",
-            Style::default().fg(p::FAINT),
-        )]),
-    ])
-    .style(Style::default().bg(p::BG));
-    f.render_widget(p_, inner);
+
+    if app.insights.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "No anomalies in CPU, Memory, Disks, Procs, Net.",
+                Style::default().fg(p::DIM),
+            )]))
+            .style(Style::default().bg(p::BG)),
+            inner,
+        );
+        return;
+    }
+
+    let take = inner.height as usize;
+    let lines: Vec<Line> = app
+        .insights
+        .iter()
+        .take(take)
+        .map(|ins| {
+            let (color, label) = match ins.severity {
+                Severity::Crit => (p::RED, "CRIT"),
+                Severity::Warn => (p::YELLOW, "WARN"),
+                Severity::Info => (p::CYAN, "INFO"),
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", label),
+                    Style::default()
+                        .fg(color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(ins.title.clone(), Style::default().fg(p::FG)),
+                Span::styled(
+                    format!("   \u{2192} {}", ins.suggested_tab.title()),
+                    Style::default().fg(p::DIM),
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        inner,
+    );
 }
 
 fn kpi_color(v: f32, warn: f32, crit: f32) -> ratatui::style::Color {

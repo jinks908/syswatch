@@ -11,8 +11,11 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Terminal;
 
+use std::collections::HashMap;
+
 use crate::collect::{Collector, Ring};
 pub use crate::collect::Snapshot;
+use crate::insights::{self, Insight};
 use crate::tabs;
 use crate::ui::chrome;
 
@@ -26,10 +29,16 @@ pub struct History {
     pub cpu: Ring<f32>,
     /// Memory used / total ratio (0..1).
     pub mem: Ring<f32>,
+    /// Swap used in bytes — used by the swap-thrash heuristic.
+    pub swap: Ring<u64>,
     /// Net rx+tx bytes/sec aggregated.
     pub net_rate: Ring<f64>,
     /// Disk rd+wr bytes/sec aggregated.
     pub io_rate: Ring<f64>,
+    /// Per-pid CPU EWMA, decayed each tick. Pids absent in the latest tick
+    /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
+    /// to find processes whose load is sustained, not transient.
+    pub proc_cpu_ewma: HashMap<u32, f32>,
 }
 
 impl History {
@@ -37,8 +46,10 @@ impl History {
         Self {
             cpu: Ring::new(cap),
             mem: Ring::new(cap),
+            swap: Ring::new(cap),
             net_rate: Ring::new(cap),
             io_rate: Ring::new(cap),
+            proc_cpu_ewma: HashMap::new(),
         }
     }
 
@@ -50,10 +61,21 @@ impl History {
             0.0
         };
         self.mem.push(m);
+        self.swap.push(snap.mem.swap_used_bytes);
         let net = snap.net.iter().map(|i| i.rx_rate + i.tx_rate).sum::<f64>();
         self.net_rate.push(net);
         self.io_rate
             .push(snap.disk_io.read_rate + snap.disk_io.write_rate);
+
+        // Update per-pid EWMA. Alpha=0.3 → ~5 ticks to stabilize.
+        // Prune pids that aren't in the current snapshot.
+        let mut next: HashMap<u32, f32> = HashMap::with_capacity(snap.procs.len());
+        for proc_ in &snap.procs {
+            let prev = self.proc_cpu_ewma.get(&proc_.pid).copied().unwrap_or(proc_.cpu_pct);
+            let ewma = 0.7 * prev + 0.3 * proc_.cpu_pct;
+            next.insert(proc_.pid, ewma);
+        }
+        self.proc_cpu_ewma = next;
     }
 }
 
@@ -173,6 +195,7 @@ pub struct App {
     pub snap: Option<Snapshot>,
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
+    pub insights: Vec<Insight>,
 }
 
 impl App {
@@ -184,6 +207,7 @@ impl App {
             snap: None,
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
+            insights: Vec::new(),
         }
     }
 
@@ -262,6 +286,7 @@ pub fn run(opts: Options) -> Result<()> {
             if !app.paused {
                 let s = collector.sample();
                 app.history.push(&s);
+                app.insights = insights::compute(&app.history, &s);
                 let mut s = s;
                 s.live = !app.paused;
                 app.snap = Some(s);
@@ -311,7 +336,12 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
         .split(area);
 
     chrome::draw_header(f, chunks[0], snap);
-    chrome::draw_tab_bar(f, chunks[1], app.active);
+    let active_insights = app
+        .insights
+        .iter()
+        .filter(|i| i.severity != insights::Severity::Info)
+        .count();
+    chrome::draw_tab_bar(f, chunks[1], app.active, active_insights);
     let body = Rect {
         x: chunks[2].x,
         y: chunks[2].y,

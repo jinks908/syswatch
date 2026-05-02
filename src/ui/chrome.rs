@@ -56,7 +56,7 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot) {
     );
 }
 
-pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId) {
+pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usize) {
     // Row 0: tab labels. Row 1: thin underline with corner glyphs around active.
     let mut label_spans: Vec<Span> = Vec::new();
     let mut underline = String::new();
@@ -65,7 +65,12 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId) {
     let mut col: usize = 0;
 
     for tab in ALL_TABS {
-        let label = format!(" [{}] {} ", tab.glyph(), tab.title());
+        let badge_suffix = if *tab == TabId::Insights && insight_count > 0 {
+            format!(" {}", insight_count)
+        } else {
+            String::new()
+        };
+        let label = format!(" [{}] {}{} ", tab.glyph(), tab.title(), badge_suffix);
         let w = label.chars().count();
         if *tab == active {
             label_spans.push(Span::styled(
@@ -83,6 +88,12 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId) {
         } else {
             label_spans.push(Span::styled(format!(" [{}] ", tab.glyph()), Style::default().fg(p::DIM)));
             label_spans.push(Span::styled(tab.title().to_string(), Style::default().fg(p::FG)));
+            if !badge_suffix.is_empty() {
+                label_spans.push(Span::styled(
+                    badge_suffix,
+                    Style::default().fg(p::YELLOW).add_modifier(Modifier::BOLD),
+                ));
+            }
             label_spans.push(Span::raw(" "));
             for _ in 0..w {
                 underline.push('\u{2500}');
