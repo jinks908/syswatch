@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod gpu;
 pub mod model;
 pub mod ring;
 

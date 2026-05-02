@@ -57,6 +57,21 @@ pub struct InterfaceTick {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct GpuTick {
+    pub name: String,
+    pub vendor: String,
+    pub driver: Option<String>,
+    pub vram_total_bytes: Option<u64>,
+    pub vram_used_bytes: Option<u64>,
+    pub util_pct: Option<f32>, // 0..100
+    pub temp_c: Option<f32>,
+    pub power_w: Option<f32>,
+    /// What the user can do to get live util/temp/power if it's currently
+    /// missing. Empty when live data is already available.
+    pub live_data_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ProcTick {
     pub pid: u32,
     pub ppid: u32,
@@ -82,4 +97,5 @@ pub struct Snapshot {
     pub disk_io: DiskIoTick,
     pub net: Vec<InterfaceTick>,
     pub procs: Vec<ProcTick>,
+    pub gpus: Vec<GpuTick>,
 }

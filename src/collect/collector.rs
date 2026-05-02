@@ -3,6 +3,7 @@ use std::time::{Instant, SystemTime};
 
 use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System, Users};
 
+use super::gpu::GpuDiscovery;
 use super::model::*;
 
 /// Collector keeps long-lived sysinfo handles + previous-tick counters so we can
@@ -18,6 +19,7 @@ pub struct Collector {
     last_disk_write: u64,
     last_iface: HashMap<String, (u64, u64)>, // name -> (rx, tx)
     last_proc_io: HashMap<u32, u64>,         // pid -> cumulative read+written bytes
+    gpu: GpuDiscovery,
     host: HostInfo,
 }
 
@@ -58,6 +60,7 @@ impl Collector {
             last_disk_write: 0,
             last_iface: HashMap::new(),
             last_proc_io: HashMap::new(),
+            gpu: GpuDiscovery::new(),
             host,
         }
     }
@@ -90,6 +93,7 @@ impl Collector {
         let (disks, disk_io) = self.collect_disks(dt_secs);
         let net = self.collect_net(dt_secs);
         let procs = self.collect_procs(dt_secs);
+        let gpus = self.gpu.refresh();
 
         let mut host = self.host.clone();
         host.uptime_secs = System::uptime();
@@ -103,6 +107,7 @@ impl Collector {
             disk_io,
             net,
             procs,
+            gpus,
         }
     }
 
