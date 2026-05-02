@@ -43,17 +43,33 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &App, snap: &Snapshot) {
 
     let header = Line::from(vec![
         Span::styled("   ", Style::default().fg(p::DIM)),
-        Span::styled(format!("{:<w$} ", "MOUNT POINT", w = mount_w as usize), header_style()),
-        Span::styled(format!("{:<w$} ", "DEVICE", w = dev_w as usize), header_style()),
+        Span::styled(
+            format!("{:<w$} ", "MOUNT POINT", w = mount_w as usize),
+            header_style(),
+        ),
+        Span::styled(
+            format!("{:<w$} ", "DEVICE", w = dev_w as usize),
+            header_style(),
+        ),
         Span::styled(format!("{:<w$} ", "FS", w = fs_w as usize), header_style()),
-        Span::styled(format!("{:>w$} ", "SIZE", w = size_w as usize), header_style()),
-        Span::styled(format!("{:>w$} ", "USED", w = used_w as usize), header_style()),
+        Span::styled(
+            format!("{:>w$} ", "SIZE", w = size_w as usize),
+            header_style(),
+        ),
+        Span::styled(
+            format!("{:>w$} ", "USED", w = used_w as usize),
+            header_style(),
+        ),
         Span::styled("USAGE", header_style()),
     ]);
 
     let mut lines = vec![header];
     let mut sorted = snap.disks.clone();
-    sorted.sort_by(|a, b| b.usage_pct.partial_cmp(&a.usage_pct).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.usage_pct
+            .partial_cmp(&a.usage_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let take = inner.height.saturating_sub(1) as usize;
     for d in sorted.iter().take(take) {
         let pct = (d.usage_pct / 100.0).clamp(0.0, 1.0);
@@ -78,7 +94,11 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &App, snap: &Snapshot) {
                 Style::default().fg(p::DIM),
             ),
             Span::styled(
-                format!("{:>w$} ", format!("{:.1}%", d.usage_pct), w = used_w as usize),
+                format!(
+                    "{:>w$} ",
+                    format!("{:.1}%", d.usage_pct),
+                    w = used_w as usize
+                ),
                 Style::default().fg(color),
             ),
         ];

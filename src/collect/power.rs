@@ -55,7 +55,10 @@ fn sample_inner() -> PowerTick {
     let mut tick = PowerTick::default();
 
     // Battery + power-draw from ioreg AppleSmartBattery.
-    if let Ok(out) = Command::new("ioreg").args(["-rn", "AppleSmartBattery"]).output() {
+    if let Ok(out) = Command::new("ioreg")
+        .args(["-rn", "AppleSmartBattery"])
+        .output()
+    {
         let text = String::from_utf8_lossy(&out.stdout);
         let battery = parse_macos_ioreg_battery(&text);
         tick.system_power_w = battery
@@ -145,7 +148,9 @@ fn sample_inner() -> PowerTick {
                 if !Path::new(&input).exists() {
                     break;
                 }
-                let rpm = read_trim(&input).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                let rpm = read_trim(&input)
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
                 if rpm == 0 {
                     continue;
                 }
@@ -274,10 +279,9 @@ fn parse_linux_battery(path: &std::path::Path) -> BatteryTick {
     bat.temp_c = read_trim(&path.join("temp"))
         .and_then(|s| s.parse::<f32>().ok())
         .map(|v| v / 10.0);
-    let energy_full_design = read_trim(&path.join("energy_full_design"))
-        .and_then(|s| s.parse::<f32>().ok());
-    let energy_full = read_trim(&path.join("energy_full"))
-        .and_then(|s| s.parse::<f32>().ok());
+    let energy_full_design =
+        read_trim(&path.join("energy_full_design")).and_then(|s| s.parse::<f32>().ok());
+    let energy_full = read_trim(&path.join("energy_full")).and_then(|s| s.parse::<f32>().ok());
     if let (Some(d), Some(f)) = (energy_full_design, energy_full) {
         if d > 0.0 {
             bat.health_pct = Some((f / d * 100.0).clamp(0.0, 100.0));
@@ -299,7 +303,9 @@ fn derive_linux_power_w(path: &std::path::Path) -> Option<f32> {
 
 #[cfg(target_os = "linux")]
 fn read_trim(p: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 #[cfg(test)]
@@ -348,7 +354,8 @@ mod tests {
     fn pmset_no_throttle_returns_100() {
         let healthy = "Note: No thermal warning level has been recorded";
         assert_eq!(parse_macos_pmset_throttle(healthy), 100);
-        let throttled = "CPU_Scheduler_Limit \t= 100\nCPU_Available_CPUs \t= 14\nCPU_Speed_Limit \t= 87";
+        let throttled =
+            "CPU_Scheduler_Limit \t= 100\nCPU_Available_CPUs \t= 14\nCPU_Speed_Limit \t= 87";
         assert_eq!(parse_macos_pmset_throttle(throttled), 87);
     }
 }

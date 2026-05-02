@@ -9,7 +9,10 @@ pub struct Ring<T> {
 
 impl<T: Clone> Ring<T> {
     pub fn new(cap: usize) -> Self {
-        Self { cap, inner: VecDeque::with_capacity(cap) }
+        Self {
+            cap,
+            inner: VecDeque::with_capacity(cap),
+        }
     }
     pub fn push(&mut self, v: T) {
         if self.inner.len() == self.cap {

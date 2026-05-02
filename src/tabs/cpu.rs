@@ -48,7 +48,9 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         width: cols[0].width,
         height: cols[0].height.saturating_sub(2),
     };
-    let lines: Vec<Line> = (0..spark_area.height).map(|_| sparkline(&normalized, p::CYAN)).collect();
+    let lines: Vec<Line> = (0..spark_area.height)
+        .map(|_| sparkline(&normalized, p::CYAN))
+        .collect();
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::BG)),
         spark_area,
@@ -96,9 +98,7 @@ fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot) {
         spans.extend(bar.spans);
         spans.push(Span::styled(
             format!(" {:>5.1}%", pct),
-            Style::default()
-                .fg(p::FG)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(p::FG).add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::from(spans));
     }

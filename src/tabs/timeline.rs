@@ -36,14 +36,31 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
     let take = inner.width as usize;
     let cpu = window_normalized(&app.history.cpu.to_vec(), take, 100.0);
     let mem = window_normalized(
-        &app.history.mem.to_vec().iter().map(|v| v * 100.0).collect::<Vec<_>>(),
+        &app.history
+            .mem
+            .to_vec()
+            .iter()
+            .map(|v| v * 100.0)
+            .collect::<Vec<_>>(),
         take,
         100.0,
     );
-    let io_raw: Vec<f32> = app.history.io_rate.to_vec().iter().map(|v| *v as f32).collect();
+    let io_raw: Vec<f32> = app
+        .history
+        .io_rate
+        .to_vec()
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
     let io_peak = io_raw.iter().cloned().fold(1.0f32, f32::max);
     let io = window_normalized(&io_raw, take, io_peak);
-    let net_raw: Vec<f32> = app.history.net_rate.to_vec().iter().map(|v| *v as f32).collect();
+    let net_raw: Vec<f32> = app
+        .history
+        .net_rate
+        .to_vec()
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
     let net_peak = net_raw.iter().cloned().fold(1.0f32, f32::max);
     let net = window_normalized(&net_raw, take, net_peak);
 
@@ -56,10 +73,8 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     for (label, series, color) in strips.iter() {
-        let mut spans: Vec<Span> = vec![Span::styled(
-            label.to_string(),
-            Style::default().fg(p::DIM),
-        )];
+        let mut spans: Vec<Span> =
+            vec![Span::styled(label.to_string(), Style::default().fg(p::DIM))];
         let line = sparkline(series, *color);
         spans.extend(line.spans);
         // Highlight the scrub cursor inside the strip if applicable.
@@ -77,7 +92,12 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
 
 /// Replace the cursor cell with a half-block ▌ and a contrasting color so the
 /// user can see exactly which tick they're inspecting.
-fn mark_cursor(spans: &mut [Span<'static>], series_len: usize, scrub: usize, _accent: ratatui::style::Color) {
+fn mark_cursor(
+    spans: &mut [Span<'static>],
+    series_len: usize,
+    scrub: usize,
+    _accent: ratatui::style::Color,
+) {
     if series_len == 0 || scrub >= series_len {
         return;
     }
@@ -133,10 +153,7 @@ fn draw_events(f: &mut Frame, area: Rect, app: &App) {
             EventKind::TopProcChange => "PROC",
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:>7}s ", ev.age_secs),
-                Style::default().fg(p::DIM),
-            ),
+            Span::styled(format!("{:>7}s ", ev.age_secs), Style::default().fg(p::DIM)),
             Span::styled(
                 format!("{:<5} ", kind_label),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -250,7 +267,10 @@ fn derive_events(app: &App) -> Vec<Event> {
     if session.len() < 2 {
         return Vec::new();
     }
-    let now = session.last().map(|s| s.t).unwrap_or(std::time::SystemTime::now());
+    let now = session
+        .last()
+        .map(|s| s.t)
+        .unwrap_or(std::time::SystemTime::now());
 
     let mut out: Vec<Event> = Vec::new();
 
@@ -268,10 +288,7 @@ fn derive_events(app: &App) -> Vec<Event> {
             .map(|p| p.name.clone());
         if let (Some(prev), Some(curr)) = (&prev_top, &top) {
             if prev != curr {
-                let age = now
-                    .duration_since(snap.t)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let age = now.duration_since(snap.t).map(|d| d.as_secs()).unwrap_or(0);
                 out.push(Event {
                     kind: EventKind::TopProcChange,
                     age_secs: age,

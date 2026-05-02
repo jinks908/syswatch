@@ -8,7 +8,11 @@ mod tabs;
 mod ui;
 
 #[derive(Parser, Debug)]
-#[command(name = "syswatch", version, about = "Single-host system diagnostics TUI")]
+#[command(
+    name = "syswatch",
+    version,
+    about = "Single-host system diagnostics TUI"
+)]
 struct Cli {
     /// Fast-loop tick in milliseconds.
     #[arg(long, default_value_t = 1000)]

@@ -16,7 +16,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, _snap: &Snapshot) {
     }
 
     // Top status strip.
-    let strip_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let strip_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
     draw_strip(f, strip_area, &app.insights);
 
     // Cards area starts one row below the strip.
@@ -45,9 +50,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, _snap: &Snapshot) {
 }
 
 fn draw_strip(f: &mut Frame, area: Rect, insights: &[Insight]) {
-    let crit = insights.iter().filter(|i| i.severity == Severity::Crit).count();
-    let warn = insights.iter().filter(|i| i.severity == Severity::Warn).count();
-    let info = insights.iter().filter(|i| i.severity == Severity::Info).count();
+    let crit = insights
+        .iter()
+        .filter(|i| i.severity == Severity::Crit)
+        .count();
+    let warn = insights
+        .iter()
+        .filter(|i| i.severity == Severity::Warn)
+        .count();
+    let info = insights
+        .iter()
+        .filter(|i| i.severity == Severity::Info)
+        .count();
     let active = crit + warn;
 
     let dot_color = if crit > 0 {
@@ -58,7 +72,10 @@ fn draw_strip(f: &mut Frame, area: Rect, insights: &[Insight]) {
         p::GREEN
     };
     let summary = if active == 0 {
-        Span::styled("0 active  — system nominal", Style::default().fg(p::GREEN).add_modifier(Modifier::BOLD))
+        Span::styled(
+            "0 active  — system nominal",
+            Style::default().fg(p::GREEN).add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::styled(
             format!("{} active", active),
@@ -71,10 +88,7 @@ fn draw_strip(f: &mut Frame, area: Rect, insights: &[Insight]) {
         summary,
         Span::styled(breakdown, Style::default().fg(p::DIM)),
     ]);
-    f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
-        area,
-    );
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(p::BG)), area);
 }
 
 fn draw_cards(f: &mut Frame, area: Rect, insights: &[Insight]) {
@@ -137,7 +151,10 @@ fn draw_card(f: &mut Frame, area: Rect, ins: &Insight) {
         Span::styled("\u{2503}", Style::default().fg(sev_fg)), // ┃ stripe
         Span::styled(
             badge,
-            Style::default().fg(sev_fg).bg(sev_bg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(sev_fg)
+                .bg(sev_bg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -145,7 +162,14 @@ fn draw_card(f: &mut Frame, area: Rect, ins: &Insight) {
             Style::default().fg(p::FG).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            pad_right(w, 1 + ins.severity.label().chars().count() + 2 + 1 + truncate(&ins.title, title_w).chars().count(), 1),
+            pad_right(
+                w,
+                1 + ins.severity.label().chars().count()
+                    + 2
+                    + 1
+                    + truncate(&ins.title, title_w).chars().count(),
+                1,
+            ),
             Style::default().bg(p::BG),
         ),
         Span::styled("\u{2502}", Style::default().fg(p::FAINT)),
@@ -206,7 +230,8 @@ fn draw_all_clear(f: &mut Frame, area: Rect) {
         severity: Severity::Info,
         title: "no anomalies detected".into(),
         body: vec![
-            "All checks passed: swap, runaway procs, disk fill, memory pressure, load, zombies.".into(),
+            "All checks passed: swap, runaway procs, disk fill, memory pressure, load, zombies."
+                .into(),
             "Insights re-evaluate every tick from the rolling session window.".into(),
         ],
         suggested_tab: crate::app::TabId::Overview,

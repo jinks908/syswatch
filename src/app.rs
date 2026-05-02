@@ -13,8 +13,8 @@ use ratatui::Terminal;
 
 use std::collections::HashMap;
 
-use crate::collect::{Collector, Ring};
 pub use crate::collect::Snapshot;
+use crate::collect::{Collector, Ring};
 use crate::insights::{self, Insight};
 use crate::tabs;
 use crate::ui::chrome;
@@ -78,7 +78,11 @@ impl History {
         // Prune pids that aren't in the current snapshot.
         let mut next: HashMap<u32, f32> = HashMap::with_capacity(snap.procs.len());
         for proc_ in &snap.procs {
-            let prev = self.proc_cpu_ewma.get(&proc_.pid).copied().unwrap_or(proc_.cpu_pct);
+            let prev = self
+                .proc_cpu_ewma
+                .get(&proc_.pid)
+                .copied()
+                .unwrap_or(proc_.cpu_pct);
             let ewma = 0.7 * prev + 0.3 * proc_.cpu_pct;
             next.insert(proc_.pid, ewma);
         }
@@ -188,7 +192,13 @@ impl ProcSort {
             ProcSort::Name => "name",
         }
     }
-    pub const ALL: [ProcSort; 5] = [ProcSort::Cpu, ProcSort::Rss, ProcSort::Io, ProcSort::Start, ProcSort::Name];
+    pub const ALL: [ProcSort; 5] = [
+        ProcSort::Cpu,
+        ProcSort::Rss,
+        ProcSort::Io,
+        ProcSort::Start,
+        ProcSort::Name,
+    ];
     fn next(self) -> ProcSort {
         let i = ProcSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
         ProcSort::ALL[(i + 1) % ProcSort::ALL.len()]
@@ -212,7 +222,10 @@ impl ServiceSort {
         }
     }
     fn next(self) -> ServiceSort {
-        let i = ServiceSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        let i = ServiceSort::ALL
+            .iter()
+            .position(|s| *s == self)
+            .unwrap_or(0);
         ServiceSort::ALL[(i + 1) % ServiceSort::ALL.len()]
     }
 }
@@ -417,10 +430,10 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Length(2),  // tab bar (label + underline)
-            Constraint::Min(0),     // body
-            Constraint::Length(2),  // footer (separator + hotkeys)
+            Constraint::Length(1), // header
+            Constraint::Length(2), // tab bar (label + underline)
+            Constraint::Min(0),    // body
+            Constraint::Length(2), // footer (separator + hotkeys)
         ])
         .split(area);
 

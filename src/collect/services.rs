@@ -176,7 +176,10 @@ PID\tStatus\tLabel
         assert_eq!(bird.status, ServiceStatus::Running);
         assert!(bird.detail.contains("signal 9"));
 
-        let progressd = svcs.iter().find(|s| s.name == "com.apple.progressd").unwrap();
+        let progressd = svcs
+            .iter()
+            .find(|s| s.name == "com.apple.progressd")
+            .unwrap();
         assert_eq!(progressd.pid, None);
         assert_eq!(progressd.exit_code, Some(-9));
         assert_eq!(progressd.status, ServiceStatus::Failed);

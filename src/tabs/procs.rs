@@ -144,12 +144,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
             ),
             Span::styled(
                 format!("{:>11} ", human_rate(proc_.io_rate)),
-                Style::default().fg(if proc_.io_rate > 0.0 { p::CYAN } else { p::DIM }).bg(row_bg),
+                Style::default()
+                    .fg(if proc_.io_rate > 0.0 { p::CYAN } else { p::DIM })
+                    .bg(row_bg),
             ),
-            Span::styled(
-                proc_.name.clone(),
-                Style::default().fg(p::FG).bg(row_bg),
-            ),
+            Span::styled(proc_.name.clone(), Style::default().fg(p::FG).bg(row_bg)),
             // Trailing fill to extend the SEL_BG band across the row.
             Span::styled(
                 fill(inner.width as usize, &proc_.name),
@@ -199,9 +198,17 @@ fn draw_drill_in(f: &mut Frame, area: Rect, procs: &[ProcTick], sel: usize) {
         kv("cmd", cmd, p::FG),
         kv("ppid", p_.ppid.to_string(), p::FG),
         kv("user", p_.user.clone(), p::FG),
-        kv("rss / virt", format!("{} / {}", human_bytes(p_.mem_rss), human_bytes(p_.mem_virt)), p::FG),
+        kv(
+            "rss / virt",
+            format!("{} / {}", human_bytes(p_.mem_rss), human_bytes(p_.mem_virt)),
+            p::FG,
+        ),
         kv("cpu", format!("{:.1}%", p_.cpu_pct), p::FG),
-        kv("io rate", human_rate(p_.io_rate), if p_.io_rate > 0.0 { p::CYAN } else { p::DIM }),
+        kv(
+            "io rate",
+            human_rate(p_.io_rate),
+            if p_.io_rate > 0.0 { p::CYAN } else { p::DIM },
+        ),
         kv("started", started, p::DIM),
     ];
     f.render_widget(

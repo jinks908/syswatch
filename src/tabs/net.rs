@@ -42,7 +42,9 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(inner);
 
-    let spark_lines: Vec<Line> = (0..cols[0].height).map(|_| sparkline(&normalized, p::CYAN)).collect();
+    let spark_lines: Vec<Line> = (0..cols[0].height)
+        .map(|_| sparkline(&normalized, p::CYAN))
+        .collect();
     f.render_widget(
         Paragraph::new(spark_lines).style(Style::default().bg(p::BG)),
         cols[0],
@@ -56,9 +58,7 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             Span::styled("now   ", Style::default().fg(p::DIM)),
             Span::styled(
                 human_rate(total),
-                Style::default()
-                    .fg(p::CYAN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -101,7 +101,10 @@ fn draw_iface_table(f: &mut Frame, area: Rect, snap: &Snapshot) {
     for iface in snap.net.iter().take(take) {
         let state_color = if iface.is_up { p::GREEN } else { p::FAINT };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<14.14} ", iface.name), Style::default().fg(p::FG)),
+            Span::styled(
+                format!("{:<14.14} ", iface.name),
+                Style::default().fg(p::FG),
+            ),
             Span::styled(
                 format!("{:<6} ", if iface.is_up { "UP" } else { "DOWN" }),
                 Style::default().fg(state_color),

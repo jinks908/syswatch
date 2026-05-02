@@ -15,7 +15,11 @@ use crate::ui::{
 pub fn draw(f: &mut Frame, area: Rect, _app: &App, snap: &Snapshot) {
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Length(7), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Min(0),
+        ])
         .split(area);
 
     draw_ram_bar(f, v[0], snap);
@@ -48,7 +52,10 @@ fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot) {
         ),
         Span::styled(" / ", Style::default().fg(p::DIM)),
         Span::styled(human_bytes(total), Style::default().fg(p::FG)),
-        Span::styled(format!("   ({:>4.1}%)", pct * 100.0), Style::default().fg(p::DIM)),
+        Span::styled(
+            format!("   ({:>4.1}%)", pct * 100.0),
+            Style::default().fg(p::DIM),
+        ),
         Span::styled("    available ", Style::default().fg(p::DIM)),
         Span::styled(human_bytes(avail), Style::default().fg(p::FG)),
     ]);
@@ -93,7 +100,10 @@ fn draw_swap(f: &mut Frame, area: Rect, snap: &Snapshot) {
             ),
             Span::styled(" / ", Style::default().fg(p::DIM)),
             Span::styled(human_bytes(total), Style::default().fg(p::FG)),
-            Span::styled(format!("   ({:>4.1}%)", pct * 100.0), Style::default().fg(p::DIM)),
+            Span::styled(
+                format!("   ({:>4.1}%)", pct * 100.0),
+                Style::default().fg(p::DIM),
+            ),
         ])
     };
     let bar = block_bar(pct, inner.width, color);
@@ -113,21 +123,42 @@ fn draw_top_rss(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let take = inner.height.saturating_sub(1) as usize;
 
     let mut lines: Vec<Line> = vec![Line::from(vec![
-        Span::styled(format!("{:>7} ", "PID"), Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<10} ", "USER"), Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:>10} ", "RSS"), Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:>10} ", "VIRT"), Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)),
-        Span::styled("COMMAND", Style::default().fg(p::DIM).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{:>7} ", "PID"),
+            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<10} ", "USER"),
+            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:>10} ", "RSS"),
+            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:>10} ", "VIRT"),
+            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "COMMAND",
+            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+        ),
     ])];
     for proc_ in sorted.iter().take(take) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:>7} ", proc_.pid), Style::default().fg(p::FG)),
-            Span::styled(format!("{:<10.10} ", proc_.user), Style::default().fg(p::DIM)),
+            Span::styled(
+                format!("{:<10.10} ", proc_.user),
+                Style::default().fg(p::DIM),
+            ),
             Span::styled(
                 format!("{:>10} ", human_bytes(proc_.mem_rss)),
                 Style::default().fg(p::CYAN),
             ),
-            Span::styled(format!("{:>10} ", human_bytes(proc_.mem_virt)), Style::default().fg(p::DIM)),
+            Span::styled(
+                format!("{:>10} ", human_bytes(proc_.mem_virt)),
+                Style::default().fg(p::DIM),
+            ),
             Span::styled(proc_.name.clone(), Style::default().fg(p::FG)),
         ]));
     }

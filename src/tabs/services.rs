@@ -168,7 +168,9 @@ fn draw_detail(f: &mut Frame, area: Rect, services: &[ServiceTick], sel: usize) 
             Span::styled(format!("{:<10} ", "status"), Style::default().fg(p::DIM)),
             Span::styled(
                 status_label,
-                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         kv(

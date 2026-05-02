@@ -47,7 +47,11 @@ fn draw_devices(f: &mut Frame, area: Rect, snap: &Snapshot) {
         human_rate(snap.disk_io.read_rate),
         human_rate(snap.disk_io.write_rate)
     );
-    let block = panel(&format!("BLOCK DEVICES  {}     {}", devices.len(), title_right));
+    let block = panel(&format!(
+        "BLOCK DEVICES  {}     {}",
+        devices.len(),
+        title_right
+    ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -62,7 +66,9 @@ fn draw_devices(f: &mut Frame, area: Rect, snap: &Snapshot) {
     ]);
 
     let mut lines = vec![header];
-    let bar_w = inner.width.saturating_sub(2 + 28 + 1 + 32 + 1 + 8 + 1 + 9 + 1 + 6 + 1);
+    let bar_w = inner
+        .width
+        .saturating_sub(2 + 28 + 1 + 32 + 1 + 8 + 1 + 9 + 1 + 6 + 1);
     for d in devices.iter() {
         let pct = (d.usage_pct / 100.0).clamp(0.0, 1.0);
         let dot_color = bar_color(d.usage_pct);
@@ -71,9 +77,15 @@ fn draw_devices(f: &mut Frame, area: Rect, snap: &Snapshot) {
         let mut spans = vec![
             Span::styled(" \u{25cf} ", Style::default().fg(dot_color)),
             Span::styled(format!("{:<28.28} ", d.device), Style::default().fg(p::FG)),
-            Span::styled(format!("{:<32.32} ", d.mount_point), Style::default().fg(p::DIM)),
+            Span::styled(
+                format!("{:<32.32} ", d.mount_point),
+                Style::default().fg(p::DIM),
+            ),
             Span::styled(format!("{:<8.8} ", d.fs_type), Style::default().fg(p::CYAN)),
-            Span::styled(format!("{:>9} ", human_bytes(d.total_bytes)), Style::default().fg(p::DIM)),
+            Span::styled(
+                format!("{:>9} ", human_bytes(d.total_bytes)),
+                Style::default().fg(p::DIM),
+            ),
             Span::styled(
                 format!("{:>5.1}% ", d.usage_pct),
                 Style::default().fg(used_color),
@@ -123,7 +135,9 @@ fn draw_throughput(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     } else {
         normalized
     };
-    let lines: Vec<Line> = (0..cols[0].height).map(|_| sparkline(&slice, p::CYAN)).collect();
+    let lines: Vec<Line> = (0..cols[0].height)
+        .map(|_| sparkline(&slice, p::CYAN))
+        .collect();
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::BG)),
         cols[0],

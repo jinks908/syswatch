@@ -17,9 +17,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),  // KPI strip
-            Constraint::Min(0),     // body
-            Constraint::Length(6),  // insights strip
+            Constraint::Length(7), // KPI strip
+            Constraint::Min(0),    // body
+            Constraint::Length(6), // insights strip
         ])
         .split(area);
 
@@ -60,8 +60,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         "MEM",
         format!("{:.0}%", mem_pct),
         kpi_color(mem_pct, 70.0, 90.0),
-        &app
-            .history
+        &app.history
             .mem
             .to_vec()
             .iter()
@@ -90,8 +89,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         "DISK IO",
         human_rate(io),
         p::CYAN,
-        &app
-            .history
+        &app.history
             .io_rate
             .to_vec()
             .iter()
@@ -106,8 +104,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         "NET",
         human_rate(net),
         p::CYAN,
-        &app
-            .history
+        &app.history
             .net_rate
             .to_vec()
             .iter()
@@ -155,10 +152,7 @@ fn kpi_tile(
         h[1].width,
         accent,
     );
-    f.render_widget(
-        Paragraph::new(bar).style(Style::default().bg(p::BG)),
-        h[1],
-    );
+    f.render_widget(Paragraph::new(bar).style(Style::default().bg(p::BG)), h[1]);
 
     if !series.is_empty() && series_max > 0.0 {
         let normalized: Vec<f32> = series.iter().map(|v| (v / series_max).min(1.0)).collect();
@@ -223,11 +217,7 @@ fn draw_top_procs(f: &mut Frame, area: Rect, snap: &Snapshot) {
         Cell::from("RSS"),
         Cell::from("COMMAND"),
     ])
-    .style(
-        Style::default()
-            .fg(p::DIM)
-            .add_modifier(Modifier::BOLD),
-    );
+    .style(Style::default().fg(p::DIM).add_modifier(Modifier::BOLD));
 
     let rows = snap
         .procs
@@ -298,9 +288,7 @@ fn draw_insights_strip(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(
                     format!(" {} ", label),
-                    Style::default()
-                        .fg(color)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
                 Span::styled(ins.title.clone(), Style::default().fg(p::FG)),

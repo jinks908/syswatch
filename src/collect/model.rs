@@ -14,7 +14,7 @@ pub struct CpuTick {
     pub load_1: f32,
     pub load_5: f32,
     pub load_15: f32,
-    pub usage_pct: f32, // aggregate 0..100
+    pub usage_pct: f32,     // aggregate 0..100
     pub per_core: Vec<f32>, // 0..100 per logical core
 }
 
@@ -107,7 +107,7 @@ impl PowerSource {
 
 #[derive(Debug, Clone, Default)]
 pub struct BatteryTick {
-    pub charge_pct: f32,         // 0..100
+    pub charge_pct: f32, // 0..100
     pub is_charging: bool,
     pub fully_charged: bool,
     pub time_remaining_min: Option<u32>,

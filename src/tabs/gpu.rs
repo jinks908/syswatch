@@ -61,7 +61,11 @@ fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick) {
     lines.push(Line::from(vec![Span::styled(
         util_label,
         Style::default()
-            .fg(if gpu.util_pct.is_some() { util_color } else { p::DIM })
+            .fg(if gpu.util_pct.is_some() {
+                util_color
+            } else {
+                p::DIM
+            })
             .add_modifier(Modifier::BOLD),
     )]));
     if let Some(u) = gpu.util_pct {
@@ -69,7 +73,9 @@ fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick) {
         lines.push(bar);
     } else {
         lines.push(Line::from(vec![Span::styled(
-            std::iter::repeat('\u{2500}').take(area.width.saturating_sub(2) as usize).collect::<String>(),
+            std::iter::repeat('\u{2500}')
+                .take(area.width.saturating_sub(2) as usize)
+                .collect::<String>(),
             Style::default().fg(p::FAINT),
         )]));
     }
@@ -79,12 +85,10 @@ fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick) {
     match (gpu.vram_total_bytes, gpu.vram_used_bytes) {
         (Some(total), Some(used)) => {
             let frac = used as f32 / total.max(1) as f32;
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("vram   {} / {}", human_bytes(used), human_bytes(total)),
-                    Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("vram   {} / {}", human_bytes(used), human_bytes(total)),
+                Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            )]));
             lines.push(block_bar(frac, area.width.saturating_sub(2), p::CYAN));
         }
         (Some(total), None) => {
@@ -120,7 +124,15 @@ fn draw_status(f: &mut Frame, area: Rect, gpu: &GpuTick) {
             .map(|t| format!("{:.0}°C", t))
             .unwrap_or_else(|| "—".into()),
         gpu.temp_c
-            .map(|t| if t >= 80.0 { p::RED } else if t >= 70.0 { p::YELLOW } else { p::GREEN })
+            .map(|t| {
+                if t >= 80.0 {
+                    p::RED
+                } else if t >= 70.0 {
+                    p::YELLOW
+                } else {
+                    p::GREEN
+                }
+            })
             .unwrap_or(p::DIM),
     ));
     lines.push(kv(

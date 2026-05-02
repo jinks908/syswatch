@@ -17,9 +17,9 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &App, snap: &Snapshot) {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // battery
-            Constraint::Length(7),  // power source / throttle / draw
-            Constraint::Min(0),     // thermal zones / fans
+            Constraint::Length(8), // battery
+            Constraint::Length(7), // power source / throttle / draw
+            Constraint::Min(0),    // thermal zones / fans
         ])
         .split(area);
 
@@ -57,9 +57,7 @@ fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     let bar_lines = vec![
         Line::from(vec![Span::styled(
             format!("{:>5.0}%", bat.charge_pct),
-            Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
         block_bar(pct, cols[0].width.saturating_sub(2), color),
@@ -76,7 +74,11 @@ fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     if let Some(t) = bat.time_remaining_min {
         let h = t / 60;
         let m = t % 60;
-        let label = if bat.is_charging { "to full" } else { "remaining" };
+        let label = if bat.is_charging {
+            "to full"
+        } else {
+            "remaining"
+        };
         lines.push(kv(label, format!("{}:{:02}", h, m), p::FG));
     } else {
         lines.push(kv("remaining", "calculating…".into(), p::DIM));
@@ -85,11 +87,23 @@ fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick) {
         lines.push(kv("cycles", c.to_string(), p::FG));
     }
     if let Some(h) = bat.health_pct {
-        let color = if h >= 80.0 { p::GREEN } else if h >= 60.0 { p::YELLOW } else { p::RED };
+        let color = if h >= 80.0 {
+            p::GREEN
+        } else if h >= 60.0 {
+            p::YELLOW
+        } else {
+            p::RED
+        };
         lines.push(kv("health", format!("{:.0}%", h), color));
     }
     if let Some(t) = bat.temp_c {
-        let color = if t >= 40.0 { p::RED } else if t >= 35.0 { p::YELLOW } else { p::GREEN };
+        let color = if t >= 40.0 {
+            p::RED
+        } else if t >= 35.0 {
+            p::YELLOW
+        } else {
+            p::GREEN
+        };
         lines.push(kv("temp", format!("{:.1}°C", t), color));
     }
     if let Some(v) = bat.voltage_v {
@@ -123,10 +137,7 @@ fn draw_status(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     };
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                "source",
-                Style::default().fg(p::DIM),
-            )]),
+            Line::from(vec![Span::styled("source", Style::default().fg(p::DIM))]),
             Line::from(""),
             Line::from(vec![
                 Span::styled(format!("{} ", src_glyph), Style::default().fg(src_color)),
@@ -141,35 +152,68 @@ fn draw_status(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     );
 
     // Throttle.
-    let (throttle_color, throttle_text, throttle_detail): (ratatui::style::Color, String, String) = match pwr.thermal_throttle_pct {
-        Some(100) => (p::GREEN, "no throttle".into(), "CPU at 100% nominal speed".into()),
-        Some(n) if n >= 80 => (p::YELLOW, format!("{}%", n), "thermal throttling — mild".into()),
-        Some(n) => (p::RED, format!("{}%", n), "thermal throttling — significant".into()),
-        None => (p::DIM, "—".into(), "platform doesn't expose throttle state".into()),
-    };
+    let (throttle_color, throttle_text, throttle_detail): (ratatui::style::Color, String, String) =
+        match pwr.thermal_throttle_pct {
+            Some(100) => (
+                p::GREEN,
+                "no throttle".into(),
+                "CPU at 100% nominal speed".into(),
+            ),
+            Some(n) if n >= 80 => (
+                p::YELLOW,
+                format!("{}%", n),
+                "thermal throttling — mild".into(),
+            ),
+            Some(n) => (
+                p::RED,
+                format!("{}%", n),
+                "thermal throttling — significant".into(),
+            ),
+            None => (
+                p::DIM,
+                "—".into(),
+                "platform doesn't expose throttle state".into(),
+            ),
+        };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled("thermal", Style::default().fg(p::DIM))]),
             Line::from(""),
             Line::from(vec![Span::styled(
                 throttle_text,
-                Style::default().fg(throttle_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(throttle_color)
+                    .add_modifier(Modifier::BOLD),
             )]),
-            Line::from(vec![Span::styled(throttle_detail, Style::default().fg(p::DIM))]),
+            Line::from(vec![Span::styled(
+                throttle_detail,
+                Style::default().fg(p::DIM),
+            )]),
         ])
         .style(Style::default().bg(p::BG)),
         cols[1],
     );
 
     // Power draw.
-    let (draw_color, draw_text, draw_detail): (ratatui::style::Color, String, String) = match pwr.system_power_w {
-        Some(w) => (
-            if w >= 30.0 { p::RED } else if w >= 15.0 { p::YELLOW } else { p::GREEN },
-            format!("{:.1} W", w),
-            "system draw at the battery".into(),
-        ),
-        None => (p::DIM, "—".into(), "needs sudo powermetrics on macOS".into()),
-    };
+    let (draw_color, draw_text, draw_detail): (ratatui::style::Color, String, String) =
+        match pwr.system_power_w {
+            Some(w) => (
+                if w >= 30.0 {
+                    p::RED
+                } else if w >= 15.0 {
+                    p::YELLOW
+                } else {
+                    p::GREEN
+                },
+                format!("{:.1} W", w),
+                "system draw at the battery".into(),
+            ),
+            None => (
+                p::DIM,
+                "—".into(),
+                "needs sudo powermetrics on macOS".into(),
+            ),
+        };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled("draw", Style::default().fg(p::DIM))]),
@@ -247,10 +291,9 @@ fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     f.render_widget(fans_block, cols[1]);
 
     if pwr.fans.is_empty() {
-        let hint = pwr
-            .live_data_hint
-            .clone()
-            .unwrap_or_else(|| "no fans reported (passive cooling or platform doesn't expose them).".into());
+        let hint = pwr.live_data_hint.clone().unwrap_or_else(|| {
+            "no fans reported (passive cooling or platform doesn't expose them).".into()
+        });
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![Span::styled(
@@ -270,10 +313,7 @@ fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick) {
             .map(|fan| {
                 Line::from(vec![
                     Span::styled(format!("{:<10.10} ", fan.name), Style::default().fg(p::FG)),
-                    Span::styled(
-                        format!("{:>5} RPM", fan.rpm),
-                        Style::default().fg(p::CYAN),
-                    ),
+                    Span::styled(format!("{:>5} RPM", fan.rpm), Style::default().fg(p::CYAN)),
                     Span::styled(
                         match fan.target_rpm {
                             Some(t) => format!("  → {} target", t),

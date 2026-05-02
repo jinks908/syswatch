@@ -230,7 +230,8 @@ impl Collector {
                 } else {
                     s.tx_bytes.saturating_sub(prev.1) as f64 / dt
                 };
-                self.last_iface.insert(name.clone(), (s.rx_bytes, s.tx_bytes));
+                self.last_iface
+                    .insert(name.clone(), (s.rx_bytes, s.tx_bytes));
                 out.push(InterfaceTick {
                     name,
                     is_up: s.is_up,
@@ -330,5 +331,9 @@ impl Collector {
 fn status_to_char(s: sysinfo::ProcessStatus) -> char {
     // ProcessStatus's Display impl yields short codes ("R", "S", "Z", …) on
     // every platform — sidestep the per-OS variant set.
-    s.to_string().chars().next().unwrap_or('?').to_ascii_uppercase()
+    s.to_string()
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_ascii_uppercase()
 }

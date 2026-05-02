@@ -55,7 +55,8 @@ pub fn block_bar(pct: f32, width: u16, color: ratatui::style::Color) -> Line<'st
 /// Block sparkline glyphs `▁▂▃▄▅▆▇█` for the supplied normalized samples (0..=1).
 pub fn sparkline(samples: &[f32], color: ratatui::style::Color) -> Line<'static> {
     const GLYPHS: [char; 8] = [
-        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
+        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
     ];
     let s: String = samples
         .iter()

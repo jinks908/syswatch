@@ -22,11 +22,20 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) 
     ));
     spans.push(Span::styled("  \u{2502}  ", Style::default().fg(p::FAINT)));
     spans.push(Span::styled("host ", Style::default().fg(p::DIM)));
-    spans.push(Span::styled(snap.host.hostname.clone(), Style::default().fg(p::FG)));
+    spans.push(Span::styled(
+        snap.host.hostname.clone(),
+        Style::default().fg(p::FG),
+    ));
     spans.push(Span::styled("  ", Style::default().fg(p::DIM)));
-    spans.push(Span::styled(snap.host.os.clone(), Style::default().fg(p::FG)));
+    spans.push(Span::styled(
+        snap.host.os.clone(),
+        Style::default().fg(p::FG),
+    ));
     spans.push(Span::styled("  up ", Style::default().fg(p::DIM)));
-    spans.push(Span::styled(format_uptime(snap.host.uptime_secs), Style::default().fg(p::FG)));
+    spans.push(Span::styled(
+        format_uptime(snap.host.uptime_secs),
+        Style::default().fg(p::FG),
+    ));
     spans.push(Span::styled("  load ", Style::default().fg(p::DIM)));
     spans.push(Span::styled(
         format!(
@@ -46,14 +55,29 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) 
 
     // Two paragraphs: left fills, right is a separate one-row area on the right edge.
     let right_w = right.chars().count() as u16 + 1;
-    let left_area = Rect { x: area.x, y: area.y, width: area.width.saturating_sub(right_w), height: 1 };
-    let right_area = Rect { x: area.x + area.width.saturating_sub(right_w), y: area.y, width: right_w, height: 1 };
+    let left_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(right_w),
+        height: 1,
+    };
+    let right_area = Rect {
+        x: area.x + area.width.saturating_sub(right_w),
+        y: area.y,
+        width: right_w,
+        height: 1,
+    };
 
-    f.render_widget(Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG).fg(p::FG)), left_area);
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG).fg(p::FG)),
+        left_area,
+    );
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             right,
-            Style::default().fg(right_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(right_color)
+                .add_modifier(Modifier::BOLD),
         )]))
         .style(Style::default().bg(p::BG)),
         right_area,
@@ -90,8 +114,14 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
                 underline.push(' ');
             }
         } else {
-            label_spans.push(Span::styled(format!(" [{}] ", tab.glyph()), Style::default().fg(p::DIM)));
-            label_spans.push(Span::styled(tab.title().to_string(), Style::default().fg(p::FG)));
+            label_spans.push(Span::styled(
+                format!(" [{}] ", tab.glyph()),
+                Style::default().fg(p::DIM),
+            ));
+            label_spans.push(Span::styled(
+                tab.title().to_string(),
+                Style::default().fg(p::FG),
+            ));
             if !badge_suffix.is_empty() {
                 label_spans.push(Span::styled(
                     badge_suffix,
@@ -121,24 +151,49 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
         underline = chars.into_iter().collect();
     }
 
-    let label_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
-    let underline_area = Rect { x: area.x, y: area.y + 1, width: area.width, height: 1 };
+    let label_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let underline_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(Line::from(label_spans)).style(Style::default().bg(p::BG)),
         label_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(underline, Style::default().fg(p::FAINT))))
-            .style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(Span::styled(
+            underline,
+            Style::default().fg(p::FAINT),
+        )))
+        .style(Style::default().bg(p::BG)),
         underline_area,
     );
 }
 
 pub fn draw_footer(f: &mut Frame, area: Rect) {
     // Row 0: thin separator. Row 1: hotkey strip.
-    let sep_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
-    let hot_area = Rect { x: area.x, y: area.y + 1, width: area.width, height: 1 };
-    let sep: String = std::iter::repeat('\u{2500}').take(area.width as usize).collect();
+    let sep_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let hot_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: 1,
+    };
+    let sep: String = std::iter::repeat('\u{2500}')
+        .take(area.width as usize)
+        .collect();
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(p::FAINT))))
             .style(Style::default().bg(p::BG)),
@@ -147,7 +202,12 @@ pub fn draw_footer(f: &mut Frame, area: Rect) {
 
     let groups: &[&[(&str, &str)]] = &[
         &[("p", "Pause"), (",", "Settings")],
-        &[("S", "Snapshot"), ("D", "Diff"), ("P", "Profile"), ("R", "Rec")],
+        &[
+            ("S", "Snapshot"),
+            ("D", "Diff"),
+            ("P", "Profile"),
+            ("R", "Rec"),
+        ],
         &[("/", "Filter"), ("q", "Quit"), ("1-9", "Tab")],
         &[("?", "Help")],
     ];
@@ -161,7 +221,10 @@ pub fn draw_footer(f: &mut Frame, area: Rect) {
                 k.to_string(),
                 Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(format!(":{} ", label), Style::default().fg(p::DIM)));
+            spans.push(Span::styled(
+                format!(":{} ", label),
+                Style::default().fg(p::DIM),
+            ));
         }
     }
     f.render_widget(

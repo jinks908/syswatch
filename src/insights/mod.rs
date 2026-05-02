@@ -314,7 +314,8 @@ fn insight_zombie_party(snap: &Snapshot) -> Option<Insight> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "Restart the parent or send it SIGCHLD; zombies hold no resources but indicate a bug.".into(),
+            "Restart the parent or send it SIGCHLD; zombies hold no resources but indicate a bug."
+                .into(),
         ],
         suggested_tab: TabId::Procs,
     })
