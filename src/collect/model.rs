@@ -69,6 +69,7 @@ pub struct ProcTick {
     pub threads: u32,
     pub state: char,
     pub start_time: Option<SystemTime>,
+    pub io_rate: f64, // bytes/sec read + written, computed against previous tick
 }
 
 #[derive(Debug, Clone)]

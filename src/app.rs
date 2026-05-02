@@ -140,11 +140,39 @@ impl TabId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcSort {
+    Cpu,
+    Rss,
+    Io,
+    Start,
+    Name,
+}
+
+impl ProcSort {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProcSort::Cpu => "cpu",
+            ProcSort::Rss => "rss",
+            ProcSort::Io => "io",
+            ProcSort::Start => "start",
+            ProcSort::Name => "name",
+        }
+    }
+    pub const ALL: [ProcSort; 5] = [ProcSort::Cpu, ProcSort::Rss, ProcSort::Io, ProcSort::Start, ProcSort::Name];
+    fn next(self) -> ProcSort {
+        let i = ProcSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        ProcSort::ALL[(i + 1) % ProcSort::ALL.len()]
+    }
+}
+
 pub struct App {
     pub active: TabId,
     pub paused: bool,
     pub history: History,
     pub snap: Option<Snapshot>,
+    pub proc_sort: ProcSort,
+    pub proc_sel: usize,
 }
 
 impl App {
@@ -154,6 +182,8 @@ impl App {
             paused: false,
             history: History::new(120),
             snap: None,
+            proc_sort: ProcSort::Cpu,
+            proc_sel: 0,
         }
     }
 
@@ -179,6 +209,21 @@ impl App {
             (KeyCode::Char('+') | KeyCode::Char('='), _) => self.active = TabId::Insights,
             (KeyCode::Tab, _) => self.active = next_tab(self.active),
             (KeyCode::BackTab, _) => self.active = prev_tab(self.active),
+            (KeyCode::Up, _) if self.active == TabId::Procs => {
+                self.proc_sel = self.proc_sel.saturating_sub(1);
+            }
+            (KeyCode::Down, _) if self.active == TabId::Procs => {
+                let max = self
+                    .snap
+                    .as_ref()
+                    .map(|s| s.procs.len().saturating_sub(1))
+                    .unwrap_or(0);
+                self.proc_sel = (self.proc_sel + 1).min(max);
+            }
+            (KeyCode::Char('s'), _) if self.active == TabId::Procs => {
+                self.proc_sort = self.proc_sort.next();
+                self.proc_sel = 0;
+            }
             _ => {}
         }
         false

@@ -7,7 +7,11 @@ use ratatui::{
 use crate::ui::palette as p;
 
 /// Standard panel block: faint borders, dim title, BG fill.
-pub fn panel(title: &str) -> Block<'_> {
+///
+/// Title is consumed (owned String) so callers can pass `format!(...)` directly
+/// without the result being dropped before the Block is rendered.
+pub fn panel(title: impl Into<String>) -> Block<'static> {
+    let title: String = title.into();
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::FAINT))

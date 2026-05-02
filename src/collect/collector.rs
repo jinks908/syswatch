@@ -17,6 +17,7 @@ pub struct Collector {
     last_disk_read: u64,
     last_disk_write: u64,
     last_iface: HashMap<String, (u64, u64)>, // name -> (rx, tx)
+    last_proc_io: HashMap<u32, u64>,         // pid -> cumulative read+written bytes
     host: HostInfo,
 }
 
@@ -56,6 +57,7 @@ impl Collector {
             last_disk_read: 0,
             last_disk_write: 0,
             last_iface: HashMap::new(),
+            last_proc_io: HashMap::new(),
             host,
         }
     }
@@ -87,7 +89,7 @@ impl Collector {
         let mem = self.collect_mem();
         let (disks, disk_io) = self.collect_disks(dt_secs);
         let net = self.collect_net(dt_secs);
-        let procs = self.collect_procs();
+        let procs = self.collect_procs(dt_secs);
 
         let mut host = self.host.clone();
         host.uptime_secs = System::uptime();
@@ -154,15 +156,21 @@ impl Collector {
             });
         }
 
-        // Aggregate per-process IO into a host-wide total — sysinfo doesn't
-        // expose per-device IO portably, so this is our best xplat proxy.
-        let mut read_total = 0u64;
-        let mut write_total = 0u64;
-        for (_pid, p) in self.sys.processes() {
-            let io = p.disk_usage();
-            read_total = read_total.saturating_add(io.total_read_bytes);
-            write_total = write_total.saturating_add(io.total_written_bytes);
-        }
+        // Prefer netwatch-sdk's /proc/diskstats reader for aggregate IO (Linux).
+        // On macOS the SDK returns None — we fall back to summing per-process IO,
+        // which is less precise but the only portable signal sysinfo gives us.
+        let (read_total, write_total) = netwatch_sdk::collectors::disk::collect_disk_io()
+            .map(|io| (io.read_bytes, io.write_bytes))
+            .unwrap_or_else(|| {
+                let mut r = 0u64;
+                let mut w = 0u64;
+                for (_pid, p) in self.sys.processes() {
+                    let io = p.disk_usage();
+                    r = r.saturating_add(io.total_read_bytes);
+                    w = w.saturating_add(io.total_written_bytes);
+                }
+                (r, w)
+            });
         let read_rate = if self.last_disk_read == 0 {
             0.0
         } else {
@@ -251,39 +259,51 @@ impl Collector {
         out
     }
 
-    fn collect_procs(&self) -> Vec<ProcTick> {
-        let mut out: Vec<ProcTick> = self
-            .sys
-            .processes()
-            .iter()
-            .map(|(pid, p)| {
-                let user = p
-                    .user_id()
-                    .and_then(|uid| self.users.get_user_by_id(uid))
-                    .map(|u| u.name().to_string())
-                    .unwrap_or_else(|| "?".into());
-                ProcTick {
-                    pid: pid.as_u32(),
-                    ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
-                    user,
-                    name: p.name().to_string_lossy().into_owned(),
-                    cmd: p
-                        .cmd()
-                        .iter()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    cpu_pct: p.cpu_usage(),
-                    mem_rss: p.memory(),
-                    mem_virt: p.virtual_memory(),
-                    threads: 1, // sysinfo doesn't expose thread count portably
-                    state: status_to_char(p.status()),
-                    start_time: Some(
-                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(p.start_time()),
-                    ),
-                }
-            })
-            .collect();
+    fn collect_procs(&mut self, dt: f64) -> Vec<ProcTick> {
+        let mut next_io: HashMap<u32, u64> = HashMap::with_capacity(self.sys.processes().len());
+        let mut out: Vec<ProcTick> = Vec::with_capacity(self.sys.processes().len());
+
+        for (pid, p) in self.sys.processes() {
+            let pid_u = pid.as_u32();
+            let io = p.disk_usage();
+            let cumulative = io.total_read_bytes.saturating_add(io.total_written_bytes);
+            let prev = self.last_proc_io.get(&pid_u).copied().unwrap_or(cumulative);
+            let io_rate = if prev == cumulative {
+                0.0
+            } else {
+                (cumulative.saturating_sub(prev)) as f64 / dt
+            };
+            next_io.insert(pid_u, cumulative);
+
+            let user = p
+                .user_id()
+                .and_then(|uid| self.users.get_user_by_id(uid))
+                .map(|u| u.name().to_string())
+                .unwrap_or_else(|| "?".into());
+            out.push(ProcTick {
+                pid: pid_u,
+                ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
+                user,
+                name: p.name().to_string_lossy().into_owned(),
+                cmd: p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                cpu_pct: p.cpu_usage(),
+                mem_rss: p.memory(),
+                mem_virt: p.virtual_memory(),
+                threads: 1, // sysinfo doesn't expose thread count portably
+                state: status_to_char(p.status()),
+                start_time: Some(
+                    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(p.start_time()),
+                ),
+                io_rate,
+            });
+        }
+        self.last_proc_io = next_io;
+
         out.sort_by(|a, b| {
             b.cpu_pct
                 .partial_cmp(&a.cpu_pct)
