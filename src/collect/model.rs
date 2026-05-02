@@ -56,6 +56,66 @@ pub struct InterfaceTick {
     pub tx_rate: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PowerSource {
+    Ac,
+    Battery,
+    #[default]
+    Unknown,
+}
+
+impl PowerSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            PowerSource::Ac => "AC",
+            PowerSource::Battery => "Battery",
+            PowerSource::Unknown => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatteryTick {
+    pub charge_pct: f32,         // 0..100
+    pub is_charging: bool,
+    pub fully_charged: bool,
+    pub time_remaining_min: Option<u32>,
+    pub cycle_count: Option<u32>,
+    pub health_pct: Option<f32>, // current_max / design_max * 100
+    pub temp_c: Option<f32>,
+    pub voltage_v: Option<f32>,
+    pub amperage_ma: Option<i32>, // signed: positive = charging, negative = discharging
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThermalZone {
+    pub name: String,
+    pub temp_c: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FanTick {
+    pub name: String,
+    pub rpm: u32,
+    pub target_rpm: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PowerTick {
+    pub source: PowerSource,
+    pub battery: Option<BatteryTick>,
+    /// 0..100 — % of nominal CPU speed available. <100 indicates thermal
+    /// throttling. None when the platform doesn't expose it.
+    pub thermal_throttle_pct: Option<u32>,
+    pub thermal_zones: Vec<ThermalZone>,
+    pub fans: Vec<FanTick>,
+    /// System-wide power draw in watts, derived from battery V*A on macOS or
+    /// from /sys/class/power_supply on Linux. None when on AC and the platform
+    /// can't measure draw without sudo (typical on macOS Apple Silicon).
+    pub system_power_w: Option<f32>,
+    pub live_data_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GpuTick {
     pub name: String,
@@ -98,4 +158,5 @@ pub struct Snapshot {
     pub net: Vec<InterfaceTick>,
     pub procs: Vec<ProcTick>,
     pub gpus: Vec<GpuTick>,
+    pub power: PowerTick,
 }

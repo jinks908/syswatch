@@ -1,0 +1,331 @@
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+
+use crate::app::{App, Snapshot};
+use crate::collect::{BatteryTick, PowerSource, PowerTick};
+use crate::ui::{
+    palette as p,
+    widgets::{block_bar, panel},
+};
+
+pub fn draw(f: &mut Frame, area: Rect, _app: &App, snap: &Snapshot) {
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),  // battery
+            Constraint::Length(7),  // power source / throttle / draw
+            Constraint::Min(0),     // thermal zones / fans
+        ])
+        .split(area);
+
+    draw_battery(f, v[0], &snap.power);
+    draw_status(f, v[1], &snap.power);
+    draw_thermal(f, v[2], &snap.power);
+}
+
+fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick) {
+    let block = panel("BATTERY");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(bat) = &pwr.battery else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "No battery detected (desktop or VM).",
+                Style::default().fg(p::DIM),
+            )]))
+            .style(Style::default().bg(p::BG)),
+            inner,
+        );
+        return;
+    };
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(inner);
+
+    // Big bar.
+    let pct = (bat.charge_pct / 100.0).clamp(0.0, 1.0);
+    let color = charge_color(bat.charge_pct, bat.is_charging);
+    let header_text = state_text(bat);
+    let bar_lines = vec![
+        Line::from(vec![Span::styled(
+            format!("{:>5.0}%", bat.charge_pct),
+            Style::default()
+                .fg(color)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        block_bar(pct, cols[0].width.saturating_sub(2), color),
+        Line::from(""),
+        Line::from(vec![Span::styled(header_text, Style::default().fg(p::DIM))]),
+    ];
+    f.render_widget(
+        Paragraph::new(bar_lines).style(Style::default().bg(p::BG)),
+        cols[0],
+    );
+
+    // Side stats.
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(t) = bat.time_remaining_min {
+        let h = t / 60;
+        let m = t % 60;
+        let label = if bat.is_charging { "to full" } else { "remaining" };
+        lines.push(kv(label, format!("{}:{:02}", h, m), p::FG));
+    } else {
+        lines.push(kv("remaining", "calculating…".into(), p::DIM));
+    }
+    if let Some(c) = bat.cycle_count {
+        lines.push(kv("cycles", c.to_string(), p::FG));
+    }
+    if let Some(h) = bat.health_pct {
+        let color = if h >= 80.0 { p::GREEN } else if h >= 60.0 { p::YELLOW } else { p::RED };
+        lines.push(kv("health", format!("{:.0}%", h), color));
+    }
+    if let Some(t) = bat.temp_c {
+        let color = if t >= 40.0 { p::RED } else if t >= 35.0 { p::YELLOW } else { p::GREEN };
+        lines.push(kv("temp", format!("{:.1}°C", t), color));
+    }
+    if let Some(v) = bat.voltage_v {
+        lines.push(kv("voltage", format!("{:.2} V", v), p::DIM));
+    }
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        cols[1],
+    );
+}
+
+fn draw_status(f: &mut Frame, area: Rect, pwr: &PowerTick) {
+    let block = panel("POWER STATUS");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+        ])
+        .split(inner);
+
+    // Source.
+    let (src_color, src_glyph) = match pwr.source {
+        PowerSource::Ac => (p::GREEN, "\u{26A1}"),
+        PowerSource::Battery => (p::YELLOW, "\u{1F50B}"),
+        PowerSource::Unknown => (p::DIM, "?"),
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                "source",
+                Style::default().fg(p::DIM),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(format!("{} ", src_glyph), Style::default().fg(src_color)),
+                Span::styled(
+                    pwr.source.label(),
+                    Style::default().fg(src_color).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ])
+        .style(Style::default().bg(p::BG)),
+        cols[0],
+    );
+
+    // Throttle.
+    let (throttle_color, throttle_text, throttle_detail): (ratatui::style::Color, String, String) = match pwr.thermal_throttle_pct {
+        Some(100) => (p::GREEN, "no throttle".into(), "CPU at 100% nominal speed".into()),
+        Some(n) if n >= 80 => (p::YELLOW, format!("{}%", n), "thermal throttling — mild".into()),
+        Some(n) => (p::RED, format!("{}%", n), "thermal throttling — significant".into()),
+        None => (p::DIM, "—".into(), "platform doesn't expose throttle state".into()),
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled("thermal", Style::default().fg(p::DIM))]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                throttle_text,
+                Style::default().fg(throttle_color).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(throttle_detail, Style::default().fg(p::DIM))]),
+        ])
+        .style(Style::default().bg(p::BG)),
+        cols[1],
+    );
+
+    // Power draw.
+    let (draw_color, draw_text, draw_detail): (ratatui::style::Color, String, String) = match pwr.system_power_w {
+        Some(w) => (
+            if w >= 30.0 { p::RED } else if w >= 15.0 { p::YELLOW } else { p::GREEN },
+            format!("{:.1} W", w),
+            "system draw at the battery".into(),
+        ),
+        None => (p::DIM, "—".into(), "needs sudo powermetrics on macOS".into()),
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled("draw", Style::default().fg(p::DIM))]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                draw_text,
+                Style::default().fg(draw_color).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(draw_detail, Style::default().fg(p::DIM))]),
+        ])
+        .style(Style::default().bg(p::BG)),
+        cols[2],
+    );
+}
+
+fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    // Thermal zones.
+    let zones_block = panel(format!("THERMAL ZONES  {}", pwr.thermal_zones.len()));
+    let zones_inner = zones_block.inner(cols[0]);
+    f.render_widget(zones_block, cols[0]);
+
+    if pwr.thermal_zones.is_empty() {
+        let hint = pwr
+            .live_data_hint
+            .clone()
+            .unwrap_or_else(|| "platform doesn't expose thermal zones without sudo.".into());
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![Span::styled(
+                    "no zones reported",
+                    Style::default().fg(p::DIM),
+                )]),
+                Line::from(""),
+                Line::from(vec![Span::styled(hint, Style::default().fg(p::FAINT))]),
+            ])
+            .style(Style::default().bg(p::BG)),
+            zones_inner,
+        );
+    } else {
+        let mut lines = Vec::new();
+        for z in pwr.thermal_zones.iter() {
+            let color = if z.temp_c >= 80.0 {
+                p::RED
+            } else if z.temp_c >= 60.0 {
+                p::YELLOW
+            } else {
+                p::GREEN
+            };
+            let bar = block_bar(
+                (z.temp_c / 100.0).clamp(0.0, 1.0),
+                zones_inner.width.saturating_sub(28),
+                color,
+            );
+            let mut spans = vec![
+                Span::styled(format!("{:<18.18} ", z.name), Style::default().fg(p::FG)),
+                Span::styled(format!("{:>5.1}°C ", z.temp_c), Style::default().fg(color)),
+            ];
+            spans.extend(bar.spans);
+            lines.push(Line::from(spans));
+        }
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(p::BG)),
+            zones_inner,
+        );
+    }
+
+    // Fans.
+    let fans_block = panel(format!("FANS  {}", pwr.fans.len()));
+    let fans_inner = fans_block.inner(cols[1]);
+    f.render_widget(fans_block, cols[1]);
+
+    if pwr.fans.is_empty() {
+        let hint = pwr
+            .live_data_hint
+            .clone()
+            .unwrap_or_else(|| "no fans reported (passive cooling or platform doesn't expose them).".into());
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![Span::styled(
+                    "no fan data",
+                    Style::default().fg(p::DIM),
+                )]),
+                Line::from(""),
+                Line::from(vec![Span::styled(hint, Style::default().fg(p::FAINT))]),
+            ])
+            .style(Style::default().bg(p::BG)),
+            fans_inner,
+        );
+    } else {
+        let lines: Vec<Line> = pwr
+            .fans
+            .iter()
+            .map(|fan| {
+                Line::from(vec![
+                    Span::styled(format!("{:<10.10} ", fan.name), Style::default().fg(p::FG)),
+                    Span::styled(
+                        format!("{:>5} RPM", fan.rpm),
+                        Style::default().fg(p::CYAN),
+                    ),
+                    Span::styled(
+                        match fan.target_rpm {
+                            Some(t) => format!("  → {} target", t),
+                            None => String::new(),
+                        },
+                        Style::default().fg(p::DIM),
+                    ),
+                ])
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(p::BG)),
+            fans_inner,
+        );
+    }
+}
+
+fn state_text(bat: &BatteryTick) -> String {
+    if bat.fully_charged {
+        "fully charged".into()
+    } else if bat.is_charging {
+        format!(
+            "charging{}",
+            bat.amperage_ma
+                .map(|a| format!(" @ {:.1} A", a as f32 / 1000.0))
+                .unwrap_or_default()
+        )
+    } else {
+        format!(
+            "discharging{}",
+            bat.amperage_ma
+                .map(|a| format!(" @ {:.1} A", a.unsigned_abs() as f32 / 1000.0))
+                .unwrap_or_default()
+        )
+    }
+}
+
+fn charge_color(pct: f32, is_charging: bool) -> ratatui::style::Color {
+    if is_charging {
+        p::CYAN
+    } else if pct <= 15.0 {
+        p::RED
+    } else if pct <= 30.0 {
+        p::YELLOW
+    } else {
+        p::GREEN
+    }
+}
+
+fn kv(k: &str, v: String, val_color: ratatui::style::Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{:<10} ", k), Style::default().fg(p::DIM)),
+        Span::styled(v, Style::default().fg(val_color)),
+    ])
+}
