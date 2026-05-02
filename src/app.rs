@@ -196,6 +196,28 @@ impl ProcSort {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceSort {
+    Name,
+    Status,
+    Pid,
+}
+
+impl ServiceSort {
+    pub const ALL: [ServiceSort; 3] = [ServiceSort::Name, ServiceSort::Status, ServiceSort::Pid];
+    pub fn label(&self) -> &'static str {
+        match self {
+            ServiceSort::Name => "name",
+            ServiceSort::Status => "status",
+            ServiceSort::Pid => "pid",
+        }
+    }
+    fn next(self) -> ServiceSort {
+        let i = ServiceSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        ServiceSort::ALL[(i + 1) % ServiceSort::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveState {
     Live,
     Paused,
@@ -209,6 +231,8 @@ pub struct App {
     pub snap: Option<Snapshot>,
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
+    pub service_sort: ServiceSort,
+    pub service_sel: usize,
     pub insights: Vec<Insight>,
     /// Scrub offset in ticks back from "now" (0 = live). Driven by Timeline's
     /// arrow keys; clamped to session length. Affects every tab via
@@ -244,6 +268,8 @@ impl App {
             snap: None,
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
+            service_sort: ServiceSort::Name,
+            service_sel: 0,
             insights: Vec::new(),
             scrub_offset: 0,
         }
@@ -285,6 +311,21 @@ impl App {
             (KeyCode::Char('s'), _) if self.active == TabId::Procs => {
                 self.proc_sort = self.proc_sort.next();
                 self.proc_sel = 0;
+            }
+            (KeyCode::Up, _) if self.active == TabId::Services => {
+                self.service_sel = self.service_sel.saturating_sub(1);
+            }
+            (KeyCode::Down, _) if self.active == TabId::Services => {
+                let max = self
+                    .snap
+                    .as_ref()
+                    .map(|s| s.services.len().saturating_sub(1))
+                    .unwrap_or(0);
+                self.service_sel = (self.service_sel + 1).min(max);
+            }
+            (KeyCode::Char('s'), _) if self.active == TabId::Services => {
+                self.service_sort = self.service_sort.next();
+                self.service_sel = 0;
             }
             // Scrub controls: active on every tab, but most useful on Timeline.
             (KeyCode::Left, _) => {

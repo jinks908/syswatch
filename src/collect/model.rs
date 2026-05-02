@@ -57,6 +57,37 @@ pub struct InterfaceTick {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceStatus {
+    Running,
+    Idle,
+    Failed,
+    #[default]
+    Unknown,
+}
+
+impl ServiceStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            ServiceStatus::Running => "Running",
+            ServiceStatus::Idle => "Idle",
+            ServiceStatus::Failed => "Failed",
+            ServiceStatus::Unknown => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServiceTick {
+    pub name: String,
+    pub status: ServiceStatus,
+    pub pid: Option<u32>,
+    pub exit_code: Option<i32>,
+    /// Free-form per-platform detail: systemd's SUB+DESCRIPTION, or
+    /// launchctl's raw status code, useful in the drill-in.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PowerSource {
     Ac,
     Battery,
@@ -159,4 +190,5 @@ pub struct Snapshot {
     pub procs: Vec<ProcTick>,
     pub gpus: Vec<GpuTick>,
     pub power: PowerTick,
+    pub services: Vec<ServiceTick>,
 }

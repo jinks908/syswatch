@@ -3,6 +3,7 @@ pub mod gpu;
 pub mod model;
 pub mod power;
 pub mod ring;
+pub mod services;
 
 pub use collector::Collector;
 pub use model::*;

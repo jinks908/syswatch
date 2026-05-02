@@ -6,6 +6,7 @@ use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System, Use
 use super::gpu::GpuDiscovery;
 use super::model::*;
 use super::power::PowerCollector;
+use super::services::ServicesCollector;
 
 /// Collector keeps long-lived sysinfo handles + previous-tick counters so we can
 /// compute rates. One instance per process; not Send across threads in the
@@ -22,6 +23,7 @@ pub struct Collector {
     last_proc_io: HashMap<u32, u64>,         // pid -> cumulative read+written bytes
     gpu: GpuDiscovery,
     power: PowerCollector,
+    services: ServicesCollector,
     host: HostInfo,
 }
 
@@ -64,6 +66,7 @@ impl Collector {
             last_proc_io: HashMap::new(),
             gpu: GpuDiscovery::new(),
             power: PowerCollector::new(),
+            services: ServicesCollector::new(),
             host,
         }
     }
@@ -98,6 +101,7 @@ impl Collector {
         let procs = self.collect_procs(dt_secs);
         let gpus = self.gpu.refresh();
         let power = self.power.sample();
+        let services = self.services.sample();
 
         let mut host = self.host.clone();
         host.uptime_secs = System::uptime();
@@ -113,6 +117,7 @@ impl Collector {
             procs,
             gpus,
             power,
+            services,
         }
     }
 

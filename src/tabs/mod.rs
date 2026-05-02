@@ -10,9 +10,9 @@ mod insights;
 mod memory;
 mod net;
 mod overview;
-mod placeholder;
 mod power;
 mod procs;
+mod services;
 mod timeline;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -26,7 +26,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         TabId::Procs => procs::draw(f, area, app, snap),
         TabId::Gpu => gpu::draw(f, area, app, snap),
         TabId::Power => power::draw(f, area, app, snap),
-        TabId::Services => placeholder::draw(f, area, "Services", "systemctl / launchctl"),
+        TabId::Services => services::draw(f, area, app, snap),
         TabId::Timeline => timeline::draw(f, area, app, snap),
         TabId::Insights => insights::draw(f, area, app, snap),
     }
