@@ -80,6 +80,31 @@ fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle) {
             Style::default().fg(p::border()),
         )]));
     }
+
+    // Apple-Silicon-only renderer / tiler split. Two slim bars half-width
+    // each, side-by-side under the main util bar. Skipped silently on
+    // platforms that don't expose the breakdown.
+    if let (Some(r), Some(t)) = (gpu.renderer_util_pct, gpu.tiler_util_pct) {
+        let total_w = area.width.saturating_sub(2) as usize;
+        // 4 chars of label per side ("R: " + " "), gap of 2 between halves.
+        let bar_w = total_w.saturating_sub(4 + 4 + 2) / 2;
+        let r_bar = block_bar_styled(r / 100.0, bar_w as u16, p::brand(), style);
+        let t_bar = block_bar_styled(t / 100.0, bar_w as u16, p::tx_rate(), style);
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(
+            format!(" R{:>3.0}% ", r),
+            Style::default().fg(p::text_muted()),
+        ));
+        spans.extend(r_bar.spans);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("T{:>3.0}% ", t),
+            Style::default().fg(p::text_muted()),
+        ));
+        spans.extend(t_bar.spans);
+        lines.push(Line::from(spans));
+    }
+
     lines.push(Line::from(""));
 
     // VRAM gauge.

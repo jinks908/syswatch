@@ -47,6 +47,8 @@ impl GpuDiscovery {
             // box we've seen, so positional matching is reliable.
             for (dev, s) in out.iter_mut().zip(stats.iter()) {
                 dev.util_pct = Some(s.device_util_pct);
+                dev.renderer_util_pct = Some(s.renderer_util_pct);
+                dev.tiler_util_pct = Some(s.tiler_util_pct);
                 if s.in_use_system_memory > 0 {
                     dev.vram_used_bytes = Some(s.in_use_system_memory);
                 }
@@ -114,6 +116,8 @@ fn discover() -> Vec<GpuTick> {
                 vram_total_bytes: vram,
                 vram_used_bytes: None,
                 util_pct: None,
+                renderer_util_pct: None,
+                tiler_util_pct: None,
                 temp_c: None,
                 power_w: None,
                 live_data_hint: Some(HINT_MACOS_TEMP_POWER.into()),
@@ -235,6 +239,8 @@ fn discover() -> Vec<GpuTick> {
             vram_total_bytes: None,
             vram_used_bytes: None,
             util_pct: None,
+            renderer_util_pct: None,
+            tiler_util_pct: None,
             temp_c: None,
             power_w: None,
             live_data_hint: Some(HINT_LINUX_GENERIC.into()),

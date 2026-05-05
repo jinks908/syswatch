@@ -56,6 +56,12 @@ pub fn compute(h: &History, snap: &Snapshot) -> Vec<Insight> {
     if let Some(i) = insight_zombie_party(snap) {
         out.push(i);
     }
+    if let Some(i) = insight_gpu_pegged(h, snap) {
+        out.push(i);
+    }
+    if let Some(i) = insight_vram_high(snap) {
+        out.push(i);
+    }
 
     // Most severe first; cap to the spec's ~6 cards budget.
     out.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -321,6 +327,91 @@ fn insight_zombie_party(snap: &Snapshot) -> Option<Insight> {
     })
 }
 
+/// Aggregate GPU util sustained near the ceiling. Reads the rolling
+/// `gpu_util` ring (max-across-devices per tick) and looks for an average
+/// ≥ 90% over the recent window, mirroring the memory-pressure pattern.
+/// Skipped silently when no device has ever reported util in the window
+/// (avoids firing on Linux NVIDIA without nvml installed).
+fn insight_gpu_pegged(h: &History, snap: &Snapshot) -> Option<Insight> {
+    let recent: Vec<f32> = h.gpu_util.to_vec();
+    let last_n = 6usize.min(recent.len());
+    if last_n < 3 {
+        return None;
+    }
+    let window = &recent[recent.len() - last_n..];
+    // If every sample in the window is exactly 0, no GPU is reporting util
+    // at all — don't fire on missing data.
+    if window.iter().all(|v| *v == 0.0) {
+        return None;
+    }
+    let avg = window.iter().sum::<f32>() / last_n as f32;
+    let severity = if avg >= 98.0 {
+        Severity::Crit
+    } else if avg >= 90.0 {
+        Severity::Warn
+    } else {
+        return None;
+    };
+    let busiest = snap
+        .gpus
+        .iter()
+        .filter_map(|g| g.util_pct.map(|u| (g, u)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(g, u)| format!("{} (vendor {}) at {:.0}%", g.name, g.vendor, u))
+        .unwrap_or_else(|| "no per-device util reported".into());
+    Some(Insight {
+        severity,
+        title: format!(
+            "GPU pegged — {:.0}% util sustained over last {}s",
+            avg, last_n
+        ),
+        body: vec![
+            busiest,
+            "Sustained near-ceiling GPU load — check the renderer/tiler split or top GPU procs."
+                .into(),
+        ],
+        suggested_tab: TabId::Gpu,
+    })
+}
+
+/// Any GPU whose VRAM occupancy is dangerously close to its limit. Doesn't
+/// need history — the moment used/total crosses the threshold the user wants
+/// to know.
+fn insight_vram_high(snap: &Snapshot) -> Option<Insight> {
+    let worst = snap
+        .gpus
+        .iter()
+        .filter_map(|g| match (g.vram_used_bytes, g.vram_total_bytes) {
+            (Some(u), Some(t)) if t > 0 => Some((g, u, t, u as f32 / t as f32)),
+            _ => None,
+        })
+        .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))?;
+    let (g, used, total, frac) = worst;
+    let pct = frac * 100.0;
+    let severity = if pct >= 95.0 {
+        Severity::Crit
+    } else if pct >= 85.0 {
+        Severity::Warn
+    } else {
+        return None;
+    };
+    Some(Insight {
+        severity,
+        title: format!(
+            "{} VRAM {:.0}% used ({} of {})",
+            g.name,
+            pct,
+            fmt_bytes(used),
+            fmt_bytes(total)
+        ),
+        body: vec![
+            "VRAM exhaustion forces the driver to spill — texture thrash or OOM-kill of the GPU process is likely soon.".into(),
+            "Close other GPU clients or reduce model/batch sizes.".into(),
+        ],
+        suggested_tab: TabId::Gpu,
+    })
+}
+
 fn fmt_bytes(b: u64) -> String {
     crate::ui::widgets::human_bytes(b)
 }
@@ -328,7 +419,7 @@ fn fmt_bytes(b: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collect::{DiskUsageTick, MemTick, ProcTick, Snapshot};
+    use crate::collect::{DiskUsageTick, GpuTick, MemTick, ProcTick, Snapshot};
 
     // ── Fixture builders ──────────────────────────────────────────────────
 
@@ -637,6 +728,121 @@ mod tests {
         let result = compute(&h, &s);
         let ins = first_with(&result, "zombie").expect("zombie insight expected");
         assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    // ── gpu_pegged ───────────────────────────────────────────────────────
+
+    fn snap_with_gpu(
+        util: Option<f32>,
+        vram_used: Option<u64>,
+        vram_total: Option<u64>,
+    ) -> Snapshot {
+        Snapshot {
+            gpus: vec![GpuTick {
+                name: "TestGPU".into(),
+                vendor: "TestCorp".into(),
+                util_pct: util,
+                vram_used_bytes: vram_used,
+                vram_total_bytes: vram_total,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gpu_pegged_does_not_fire_for_idle_gpu() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap_with_gpu(Some(15.0), None, None));
+        }
+        let s = snap_with_gpu(Some(15.0), None, None);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "GPU pegged").is_none());
+    }
+
+    #[test]
+    fn gpu_pegged_does_not_fire_when_no_util_reported() {
+        // Linux NVIDIA-without-nvml shape: util_pct = None on every tick →
+        // gpu_util ring is all-zero → don't fire.
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap_with_gpu(None, None, None));
+        }
+        let s = snap_with_gpu(None, None, None);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "GPU pegged").is_none());
+    }
+
+    #[test]
+    fn gpu_pegged_fires_warn_at_sustained_90pct() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap_with_gpu(Some(92.0), None, None));
+        }
+        let s = snap_with_gpu(Some(92.0), None, None);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "GPU pegged").expect("gpu pegged expected");
+        assert_eq!(ins.severity, Severity::Warn);
+        assert_eq!(ins.suggested_tab, TabId::Gpu);
+    }
+
+    #[test]
+    fn gpu_pegged_fires_crit_at_sustained_98pct() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap_with_gpu(Some(99.0), None, None));
+        }
+        let s = snap_with_gpu(Some(99.0), None, None);
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "GPU pegged").expect("gpu pegged expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    #[test]
+    fn gpu_pegged_does_not_fire_for_single_spike() {
+        let mut h = empty_history();
+        for _ in 0..10 {
+            h.push(&snap_with_gpu(Some(20.0), None, None));
+        }
+        // One tick at 100% — average over last 6 stays well below 90%.
+        h.push(&snap_with_gpu(Some(100.0), None, None));
+        let s = snap_with_gpu(Some(100.0), None, None);
+        let result = compute(&h, &s);
+        assert!(first_with(&result, "GPU pegged").is_none());
+    }
+
+    // ── vram_high ────────────────────────────────────────────────────────
+
+    #[test]
+    fn vram_high_does_not_fire_below_85pct() {
+        let h = empty_history();
+        let s = snap_with_gpu(Some(50.0), Some(8 * GIB), Some(16 * GIB)); // 50%
+        assert!(first_with(&compute(&h, &s), "VRAM").is_none());
+    }
+
+    #[test]
+    fn vram_high_fires_warn_at_85pct() {
+        let h = empty_history();
+        let s = snap_with_gpu(Some(50.0), Some(14 * GIB), Some(16 * GIB)); // 87.5%
+        let ins = first_with(&compute(&h, &s), "VRAM").expect("vram insight expected");
+        assert_eq!(ins.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn vram_high_fires_crit_at_95pct() {
+        let h = empty_history();
+        let s = snap_with_gpu(Some(50.0), Some(16 * GIB - 200 * MIB), Some(16 * GIB)); // ~98.8%
+        let ins = first_with(&compute(&h, &s), "VRAM").expect("vram insight expected");
+        assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    #[test]
+    fn vram_high_skips_devices_without_total() {
+        let h = empty_history();
+        // VRAM total unknown — can't compute fraction, must not fire.
+        let s = snap_with_gpu(Some(50.0), Some(8 * GIB), None);
+        assert!(first_with(&compute(&h, &s), "VRAM").is_none());
     }
 
     // ── compute() ordering / capping ──────────────────────────────────────

@@ -160,6 +160,11 @@ pub struct GpuTick {
     pub vram_total_bytes: Option<u64>,
     pub vram_used_bytes: Option<u64>,
     pub util_pct: Option<f32>, // 0..100
+    /// Apple Silicon split — fragment shader / fixed-function rasterizer
+    /// load. Sums roughly to `util_pct`. None on platforms that don't
+    /// expose the breakdown.
+    pub renderer_util_pct: Option<f32>,
+    pub tiler_util_pct: Option<f32>,
     pub temp_c: Option<f32>,
     pub power_w: Option<f32>,
     /// What the user can do to get live util/temp/power if it's currently

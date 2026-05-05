@@ -36,6 +36,10 @@ pub struct History {
     pub net_rate: Ring<f64>,
     /// Disk rd+wr bytes/sec aggregated.
     pub io_rate: Ring<f64>,
+    /// Aggregate GPU usage % (0..100), max across all detected devices per
+    /// tick — captures the "any GPU is busy" signal regardless of which one.
+    /// 0 when no GPU exposes live util (Linux NVIDIA without nvml, etc.).
+    pub gpu_util: Ring<f32>,
     /// Per-pid CPU EWMA, decayed each tick. Pids absent in the latest tick
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
@@ -54,6 +58,7 @@ impl History {
             swap: Ring::new(cap),
             net_rate: Ring::new(cap),
             io_rate: Ring::new(cap),
+            gpu_util: Ring::new(cap),
             proc_cpu_ewma: HashMap::new(),
             session: Ring::new(cap),
         }
@@ -74,6 +79,15 @@ impl History {
         self.net_rate.push(net);
         self.io_rate
             .push(snap.disk_io.read_rate + snap.disk_io.write_rate);
+        // Max util across all GPUs — handles laptops with iGPU+dGPU and the
+        // common case of a single device alike. Defaults to 0 when no device
+        // exposes util_pct.
+        let gpu = snap
+            .gpus
+            .iter()
+            .filter_map(|g| g.util_pct)
+            .fold(0.0_f32, f32::max);
+        self.gpu_util.push(gpu);
 
         // Update per-pid EWMA. Alpha=0.3 → ~5 ticks to stabilize.
         // Prune pids that aren't in the current snapshot.

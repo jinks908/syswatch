@@ -17,7 +17,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, _snap: &Snapshot) {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10), // activity strips
+            Constraint::Length(12), // activity strips (5 × 2 rows)
             Constraint::Min(0),     // event log
             Constraint::Length(4),  // scrubber
         ])
@@ -63,12 +63,14 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let net_peak = net_raw.iter().cloned().fold(1.0f32, f32::max);
     let net = window_normalized(&net_raw, take, net_peak);
+    let gpu = window_normalized(&app.history.gpu_util.to_vec(), take, 100.0);
 
     let strips = [
         ("cpu  ", &cpu, p::status_good()),
         ("mem  ", &mem, p::status_warn()),
         ("io   ", &io, p::brand()),
         ("net  ", &net, p::tx_rate()),
+        ("gpu  ", &gpu, p::status_error()),
     ];
 
     let mut lines: Vec<Line> = Vec::new();
