@@ -1,6 +1,6 @@
 [package]
 name = "syswatch"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Single-host, read-only system diagnostics TUI. Twelve tabs covering CPU, memory, disks, processes, GPU, power, services, network, plus a Timeline scrubber and an Insights anomaly engine. Sibling to netwatch."
 license = "MIT"
@@ -39,6 +39,8 @@ chrono = { version = "0.4", features = ["serde"] }
 #   netwatch-sdk = { path = "../../netwatch-sdk" }
 # in this Cargo.toml — keep it out of commits.
 netwatch-sdk = "0.1"
+toml = "0.8"
+dirs = "5"
 
 # Linux NVIDIA support is opt-in: enabling `gpu-nvidia` links libnvidia-ml,
 # which only ships on hosts with the proprietary driver installed.

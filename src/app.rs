@@ -15,14 +15,17 @@ use std::collections::HashMap;
 
 pub use crate::collect::Snapshot;
 use crate::collect::{Collector, Ring};
+use crate::config::SyswatchConfig;
 use crate::insights::{self, Insight};
 use crate::tabs;
 use crate::ui::chrome;
 use crate::ui::graph::GraphStyle;
 
 pub struct Options {
-    pub tick_ms: u64,
     pub start_tab: Option<String>,
+    /// Source of truth for tick_ms / theme / graph_style / default_tab.
+    /// CLI overrides are applied to this struct in main() before handoff.
+    pub config: SyswatchConfig,
 }
 
 pub struct History {
@@ -269,6 +272,26 @@ pub struct App {
     /// Chart rendering style. Toggled with `g`. Affects every multi-row
     /// sparkline tile (CPU/Net/Disks aggregates, Overview KPIs).
     pub graph_style: GraphStyle,
+
+    // ── Settings popup state ─────────────────────────────────────────────
+    /// In-memory user config. Mutated by the settings popup; written to
+    /// disk only when the user presses S. `t`/`g` mutate runtime state
+    /// AND mirror into this struct so that opening settings reflects
+    /// current values.
+    pub user_config: SyswatchConfig,
+    /// Whether the settings popup is open. Routes key input through
+    /// `crate::ui::settings` while true.
+    pub settings_active: bool,
+    /// Cursor row inside the settings popup.
+    pub settings_cursor: usize,
+    /// Whether the popup is in text-edit mode for the cursor row
+    /// (numerics — currently just `tick_ms`).
+    pub settings_editing: bool,
+    /// Buffer for in-progress text edits.
+    pub settings_edit_buf: String,
+    /// Status line shown under the popup body — "saved", validation
+    /// errors, etc.
+    pub settings_status: Option<String>,
 }
 
 impl App {
@@ -291,7 +314,13 @@ impl App {
 }
 
 impl App {
-    fn new(start: TabId) -> Self {
+    fn new(start: TabId, config: SyswatchConfig) -> Self {
+        // Theme is already applied globally in main(). Resolve graph_style
+        // from the same config.
+        let graph_style = match config.graph_style.to_lowercase().as_str() {
+            "dots" => GraphStyle::Dots,
+            _ => GraphStyle::Bars,
+        };
         Self {
             active: start,
             paused: false,
@@ -303,7 +332,13 @@ impl App {
             service_sel: 0,
             insights: Vec::new(),
             scrub_offset: 0,
-            graph_style: GraphStyle::Bars,
+            graph_style,
+            user_config: config,
+            settings_active: false,
+            settings_cursor: 0,
+            settings_editing: false,
+            settings_edit_buf: String::new(),
+            settings_status: None,
         }
     }
 
@@ -311,13 +346,31 @@ impl App {
         if k.kind != KeyEventKind::Press {
             return false;
         }
+        // Settings popup absorbs all input while active. Returns true if
+        // the popup wants the parent app to ignore the key entirely.
+        if self.settings_active {
+            return self.handle_settings_key(k);
+        }
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('p'), _) => self.paused = !self.paused,
-            (KeyCode::Char('g'), _) => self.graph_style = self.graph_style.next(),
+            (KeyCode::Char(','), _) => {
+                self.settings_active = true;
+                self.settings_cursor = 0;
+                self.settings_status = None;
+                self.settings_editing = false;
+                return false;
+            }
+            (KeyCode::Char('g'), _) => {
+                self.graph_style = self.graph_style.next();
+                // Mirror into user_config so the settings popup sees the
+                // current value. Disk write happens only on S in settings.
+                self.user_config.graph_style = self.graph_style.label().into();
+            }
             (KeyCode::Char('t'), _) => {
-                crate::ui::theme::cycle();
+                let next = crate::ui::theme::cycle();
+                self.user_config.theme = next.into();
             }
             (KeyCode::Char('1'), _) => self.active = TabId::Overview,
             (KeyCode::Char('2'), _) => self.active = TabId::Cpu,
@@ -383,6 +436,99 @@ impl App {
     }
 }
 
+impl App {
+    /// Settings-popup key router. Returns true to quit the app (only on
+    /// Ctrl-C); false otherwise.
+    fn handle_settings_key(&mut self, k: KeyEvent) -> bool {
+        use crate::ui::settings;
+        if self.settings_editing {
+            match k.code {
+                KeyCode::Esc => {
+                    self.settings_editing = false;
+                    self.settings_edit_buf.clear();
+                    self.settings_status = None;
+                }
+                KeyCode::Enter => {
+                    let buf = std::mem::take(&mut self.settings_edit_buf);
+                    match settings::apply_edit(&mut self.user_config, self.settings_cursor, &buf) {
+                        Ok(()) => {
+                            self.settings_editing = false;
+                            self.settings_status = Some("applied (press S to save to disk)".into());
+                        }
+                        Err(msg) => {
+                            self.settings_status = Some(msg);
+                            // Keep editing so user can retry.
+                            self.settings_edit_buf = buf;
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.settings_edit_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.settings_edit_buf.push(c);
+                }
+                _ => {}
+            }
+            return false;
+        }
+        match (k.code, k.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Esc, _) => {
+                self.settings_active = false;
+                self.settings_status = None;
+            }
+            (KeyCode::Up, _) => {
+                self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                self.settings_status = None;
+            }
+            (KeyCode::Down, _) => {
+                self.settings_cursor = (self.settings_cursor + 1).min(settings::ROWS - 1);
+                self.settings_status = None;
+            }
+            (KeyCode::Left, _) => {
+                settings::cycle_prev(&mut self.user_config, self.settings_cursor);
+                self.apply_runtime_from_config();
+            }
+            (KeyCode::Right, _) => {
+                settings::cycle_next(&mut self.user_config, self.settings_cursor);
+                self.apply_runtime_from_config();
+            }
+            (KeyCode::Enter, _) => {
+                // Enter is only meaningful for non-enum (text) rows.
+                self.settings_edit_buf =
+                    settings::edit_value(&self.user_config, self.settings_cursor);
+                self.settings_editing = true;
+                self.settings_status = None;
+            }
+            (KeyCode::Char('s' | 'S'), _) => match self.user_config.save() {
+                Ok(()) => {
+                    self.settings_status = Some(format!(
+                        "saved to {}",
+                        crate::config::SyswatchConfig::path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "config dir".into())
+                    ));
+                }
+                Err(e) => self.settings_status = Some(format!("save failed: {}", e)),
+            },
+            _ => {}
+        }
+        false
+    }
+
+    /// Sync runtime state (theme + graph_style) from `user_config`. Called
+    /// after each ←/→ cycle in the settings popup so the user sees the
+    /// effect immediately on the dashboard behind the popup.
+    fn apply_runtime_from_config(&mut self) {
+        crate::ui::theme::set_by_name(&self.user_config.theme);
+        self.graph_style = match self.user_config.graph_style.to_lowercase().as_str() {
+            "dots" => GraphStyle::Dots,
+            _ => GraphStyle::Bars,
+        };
+    }
+}
+
 fn next_tab(t: TabId) -> TabId {
     let i = ALL_TABS.iter().position(|x| *x == t).unwrap_or(0);
     ALL_TABS[(i + 1) % ALL_TABS.len()]
@@ -399,7 +545,7 @@ pub fn run(opts: Options) -> Result<()> {
         .as_deref()
         .and_then(TabId::from_str_loose)
         .unwrap_or(TabId::Overview);
-    let mut app = App::new(start);
+    let mut app = App::new(start, opts.config);
     let mut collector = Collector::new();
 
     enable_raw_mode()?;
@@ -408,9 +554,16 @@ pub fn run(opts: Options) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
 
-    let tick = Duration::from_millis(opts.tick_ms.max(100));
-    let mut last_tick = Instant::now() - tick; // force immediate sample
+    // Force the first sample to fire immediately. After that we re-read
+    // the tick interval from `user_config` on every iteration so changes
+    // made through the settings popup take effect on the next cycle
+    // without a restart.
+    let mut last_tick = Instant::now() - Duration::from_secs(60);
     let res = loop {
+        // 100..=5000 ms — matches the validation in `config::validate`
+        // and `settings::apply_edit`. The clamp is defensive in case a
+        // hand-edited config slipped through.
+        let tick = Duration::from_millis(app.user_config.tick_ms.clamp(100, 5000));
         if last_tick.elapsed() >= tick {
             if !app.paused {
                 let s = collector.sample();
@@ -475,6 +628,12 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
     };
     tabs::draw(f, body, app, snap);
     chrome::draw_footer(f, chunks[3], app.graph_style);
+
+    // Settings popup paints over the dashboard. Drawn last so it sits
+    // on top of every layer.
+    if app.settings_active {
+        crate::ui::settings::render(f, app, area);
+    }
 }
 
 #[cfg(test)]
