@@ -292,6 +292,26 @@ pub struct App {
     /// Status line shown under the popup body — "saved", validation
     /// errors, etc.
     pub settings_status: Option<String>,
+
+    /// Transient status flash shown in the footer — used by the `S`
+    /// snapshot command to confirm the dump path. `(message, expires_at)`.
+    pub footer_flash: Option<(String, Instant)>,
+
+    /// Whether the `?` help popup is open. Absorbs all input while true
+    /// (Esc / `?` to close).
+    pub help_active: bool,
+
+    // ── Procs filter (`/` key) ──────────────────────────────────────────
+    /// True while the user is typing into the filter input box. Esc
+    /// cancels (drops both the buffer and any active filter); Enter
+    /// commits the buffer to `proc_filter_active`.
+    pub proc_filter_input: bool,
+    /// In-progress filter text. Applied live to the procs list while
+    /// typing so the user sees match results immediately.
+    pub proc_filter_buf: String,
+    /// Currently-applied filter (case-insensitive substring match
+    /// against name/cmd/user). None means no filter.
+    pub proc_filter_active: Option<String>,
 }
 
 impl App {
@@ -339,11 +359,68 @@ impl App {
             settings_editing: false,
             settings_edit_buf: String::new(),
             settings_status: None,
+            footer_flash: None,
+            help_active: false,
+            proc_filter_input: false,
+            proc_filter_buf: String::new(),
+            proc_filter_active: None,
         }
     }
 
     fn handle_key(&mut self, k: KeyEvent) -> bool {
         if k.kind != KeyEventKind::Press {
+            return false;
+        }
+        // Procs filter input mode — narrow keyboard scope so chars
+        // typed into the search box don't also fire dashboard hotkeys.
+        if self.proc_filter_input {
+            match (k.code, k.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+                (KeyCode::Esc, _) => {
+                    // Cancel: drop both the in-progress text and any
+                    // currently-applied filter.
+                    self.proc_filter_input = false;
+                    self.proc_filter_buf.clear();
+                    self.proc_filter_active = None;
+                    self.proc_sel = 0;
+                }
+                (KeyCode::Enter, _) => {
+                    self.proc_filter_input = false;
+                    self.proc_filter_active = if self.proc_filter_buf.is_empty() {
+                        None
+                    } else {
+                        Some(self.proc_filter_buf.clone())
+                    };
+                    self.proc_sel = 0;
+                }
+                (KeyCode::Backspace, _) => {
+                    self.proc_filter_buf.pop();
+                    // Live-apply so the table updates as the user types.
+                    self.proc_filter_active = if self.proc_filter_buf.is_empty() {
+                        None
+                    } else {
+                        Some(self.proc_filter_buf.clone())
+                    };
+                    self.proc_sel = 0;
+                }
+                (KeyCode::Char(c), _) => {
+                    self.proc_filter_buf.push(c);
+                    self.proc_filter_active = Some(self.proc_filter_buf.clone());
+                    self.proc_sel = 0;
+                }
+                _ => {}
+            }
+            return false;
+        }
+        // Help popup is the simplest modal — Esc, `?`, or Ctrl-C close
+        // it; every other key is swallowed so the user can't accidentally
+        // act on the dashboard behind the popup.
+        if self.help_active {
+            match (k.code, k.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+                (KeyCode::Esc, _) | (KeyCode::Char('?'), _) => self.help_active = false,
+                _ => {}
+            }
             return false;
         }
         // Settings popup absorbs all input while active. Returns true if
@@ -361,6 +438,22 @@ impl App {
                 self.settings_status = None;
                 self.settings_editing = false;
                 return false;
+            }
+            (KeyCode::Char('?'), _) => {
+                self.help_active = true;
+                return false;
+            }
+            (KeyCode::Char('S'), _) => {
+                // Dump the currently-displayed snapshot (live or scrubbed).
+                // Status flash shows the resulting path for ~3s.
+                let msg = match self.displayed_snap() {
+                    Some(snap) => match crate::snapshot::write(snap) {
+                        Ok(path) => format!("snapshot → {}", path.display()),
+                        Err(e) => format!("snapshot failed: {}", e),
+                    },
+                    None => "no snapshot yet — wait for first sample".into(),
+                };
+                self.footer_flash = Some((msg, Instant::now() + Duration::from_secs(3)));
             }
             (KeyCode::Char('g'), _) => {
                 self.graph_style = self.graph_style.next();
@@ -390,16 +483,33 @@ impl App {
                 self.proc_sel = self.proc_sel.saturating_sub(1);
             }
             (KeyCode::Down, _) if self.active == TabId::Procs => {
+                // Clamp against the *filtered* list — netwatch issue #26
+                // taught us not to let selection land on rows the user
+                // can't see.
                 let max = self
                     .snap
                     .as_ref()
-                    .map(|s| s.procs.len().saturating_sub(1))
+                    .map(|s| {
+                        crate::tabs::procs::filtered_sorted(
+                            &s.procs,
+                            self.proc_sort,
+                            self.proc_filter_active.as_deref(),
+                        )
+                        .len()
+                        .saturating_sub(1)
+                    })
                     .unwrap_or(0);
                 self.proc_sel = (self.proc_sel + 1).min(max);
             }
             (KeyCode::Char('s'), _) if self.active == TabId::Procs => {
                 self.proc_sort = self.proc_sort.next();
                 self.proc_sel = 0;
+            }
+            (KeyCode::Char('/'), _) if self.active == TabId::Procs => {
+                // Enter filter input mode. Pre-fill with the current
+                // applied filter (if any) so the user can refine it.
+                self.proc_filter_input = true;
+                self.proc_filter_buf = self.proc_filter_active.clone().unwrap_or_default();
             }
             (KeyCode::Up, _) if self.active == TabId::Services => {
                 self.service_sel = self.service_sel.saturating_sub(1);
@@ -627,12 +737,23 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
         height: chunks[2].height,
     };
     tabs::draw(f, body, app, snap);
-    chrome::draw_footer(f, chunks[3], app.graph_style);
+    // Drain expired footer flashes before drawing.
+    let flash = app
+        .footer_flash
+        .as_ref()
+        .filter(|(_, expires)| Instant::now() < *expires)
+        .map(|(msg, _)| msg.as_str());
+    chrome::draw_footer(f, chunks[3], app.graph_style, flash);
 
-    // Settings popup paints over the dashboard. Drawn last so it sits
-    // on top of every layer.
+    // Modal popups paint over the dashboard. Help wins ties since it's
+    // a hard requirement to read the docs even with settings open
+    // (in practice both modals can't be open at once, but this is the
+    // safe ordering).
     if app.settings_active {
         crate::ui::settings::render(f, app, area);
+    }
+    if app.help_active {
+        crate::ui::help::render(f, area);
     }
 }
 

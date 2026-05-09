@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -17,19 +17,91 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // sort strip
+            Constraint::Length(1), // sort strip / filter input
             Constraint::Min(0),    // process table
             Constraint::Length(7), // drill-in
         ])
         .split(area);
 
     draw_sort_strip(f, v[0], app, snap);
-    let sorted = sort_procs(&snap.procs, app.proc_sort);
-    draw_table(f, v[1], app, &sorted);
-    draw_drill_in(f, v[2], &sorted, app.proc_sel);
+    let view = filtered_sorted(
+        &snap.procs,
+        app.proc_sort,
+        app.proc_filter_active.as_deref(),
+    );
+    draw_table(f, v[1], app, &view);
+    draw_drill_in(f, v[2], &view, app.proc_sel);
+}
+
+/// Filter then sort the proc list. `filter` is a case-insensitive
+/// substring match against name / cmd / user. Public so the App key
+/// handler can use the same view to clamp `proc_sel`.
+pub(crate) fn filtered_sorted(
+    procs: &[ProcTick],
+    key: ProcSort,
+    filter: Option<&str>,
+) -> Vec<ProcTick> {
+    let needle = filter.map(|s| s.to_lowercase());
+    let mut out: Vec<ProcTick> = procs
+        .iter()
+        .filter(|p| match needle.as_deref() {
+            None => true,
+            Some(n) => {
+                p.name.to_lowercase().contains(n)
+                    || p.cmd.to_lowercase().contains(n)
+                    || p.user.to_lowercase().contains(n)
+            }
+        })
+        .cloned()
+        .collect();
+    sort_in_place(&mut out, key);
+    out
+}
+
+fn sort_in_place(out: &mut [ProcTick], key: ProcSort) {
+    match key {
+        ProcSort::Cpu => out.sort_by(|a, b| {
+            b.cpu_pct
+                .partial_cmp(&a.cpu_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        ProcSort::Rss => out.sort_by(|a, b| b.mem_rss.cmp(&a.mem_rss)),
+        ProcSort::Io => out.sort_by(|a, b| {
+            b.io_rate
+                .partial_cmp(&a.io_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        ProcSort::Start => out.sort_by(|a, b| b.start_time.cmp(&a.start_time)),
+        ProcSort::Name => out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+    }
 }
 
 fn draw_sort_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    // While typing into the filter, the strip becomes a single-line
+    // input box — no sort chips, just the prompt and a cursor.
+    if app.proc_filter_input {
+        let line = Line::from(vec![
+            Span::styled(" / ", Style::default().fg(p::brand()).bold()),
+            Span::styled(
+                app.proc_filter_buf.clone(),
+                Style::default().fg(p::text_primary()),
+            ),
+            Span::styled(
+                "▏",
+                Style::default().fg(p::brand()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "    Enter:apply  Esc:cancel",
+                Style::default().fg(p::text_muted()),
+            ),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().bg(p::bg())),
+            area,
+        );
+        return;
+    }
+
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(" sort ", Style::default().fg(p::text_muted())));
     for s in ProcSort::ALL.iter() {
@@ -49,11 +121,24 @@ fn draw_sort_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             spans.push(Span::raw(" "));
         }
     }
-    spans.push(Span::styled(
+    // Show match count when a filter is applied so the user can see
+    // how aggressive the narrowing is at a glance.
+    let count_text = if let Some(f) = app.proc_filter_active.as_deref() {
+        let visible = filtered_sorted(&snap.procs, app.proc_sort, Some(f)).len();
         format!(
-            "    {} procs   press s to cycle sort, ↑/↓ select",
+            "    {}/{} procs  filter: \"{}\"   /:edit  s:sort  ↑↓:select",
+            visible,
+            snap.procs.len(),
+            f
+        )
+    } else {
+        format!(
+            "    {} procs   /:filter  s:sort  ↑↓:select",
             snap.procs.len()
-        ),
+        )
+    };
+    spans.push(Span::styled(
+        count_text,
         Style::default().fg(p::text_muted()),
     ));
     f.render_widget(
@@ -235,24 +320,10 @@ fn kv(k: &str, v: String, val_color: ratatui::style::Color) -> Line<'static> {
     ])
 }
 
+/// Test-only convenience: same as `filtered_sorted(procs, key, None)`.
+#[cfg(test)]
 fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
-    let mut out = procs.to_vec();
-    match key {
-        ProcSort::Cpu => out.sort_by(|a, b| {
-            b.cpu_pct
-                .partial_cmp(&a.cpu_pct)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-        ProcSort::Rss => out.sort_by(|a, b| b.mem_rss.cmp(&a.mem_rss)),
-        ProcSort::Io => out.sort_by(|a, b| {
-            b.io_rate
-                .partial_cmp(&a.io_rate)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-        ProcSort::Start => out.sort_by(|a, b| b.start_time.cmp(&a.start_time)),
-        ProcSort::Name => out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-    }
-    out
+    filtered_sorted(procs, key, None)
 }
 
 fn fill(width: usize, used: &str) -> String {
@@ -351,5 +422,54 @@ mod tests {
         let original_first = input[0].name.clone();
         let _ = sort_procs(&input, ProcSort::Cpu);
         assert_eq!(input[0].name, original_first);
+    }
+
+    // ── filter behavior ─────────────────────────────────────────────────
+
+    #[test]
+    fn filter_none_returns_full_sorted_list() {
+        let s = filtered_sorted(&fixture(), ProcSort::Cpu, None);
+        assert_eq!(s.len(), 4);
+    }
+
+    #[test]
+    fn filter_substring_is_case_insensitive() {
+        // "BRAV" should still match "Bravo"; "Char" matches "charlie".
+        let a = filtered_sorted(&fixture(), ProcSort::Cpu, Some("BRAV"));
+        assert_eq!(names(&a), vec!["Bravo"]);
+        let b = filtered_sorted(&fixture(), ProcSort::Cpu, Some("Char"));
+        assert_eq!(names(&b), vec!["charlie"]);
+    }
+
+    #[test]
+    fn filter_no_match_returns_empty() {
+        let s = filtered_sorted(&fixture(), ProcSort::Cpu, Some("zzz_no_proc"));
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn filter_then_sort_preserves_sort_order() {
+        // Two procs match "a" — alpha and charlie — and Cpu sort should
+        // put charlie (30) before alpha (5).
+        let s = filtered_sorted(&fixture(), ProcSort::Cpu, Some("a"));
+        // Hmm — "Bravo" and "delta" also contain 'a', so all 4 match.
+        // Sort by CPU desc: Bravo 90, charlie 30, alpha 5, delta 0.5.
+        assert_eq!(names(&s), vec!["Bravo", "charlie", "alpha", "delta"]);
+    }
+
+    #[test]
+    fn filter_matches_user_field() {
+        let mut procs = fixture();
+        procs[0].user = "deploy".into();
+        let s = filtered_sorted(&procs, ProcSort::Cpu, Some("deploy"));
+        assert_eq!(names(&s), vec!["alpha"]);
+    }
+
+    #[test]
+    fn filter_matches_cmd_field() {
+        let mut procs = fixture();
+        procs[1].cmd = "/usr/bin/some-binary --flag".into();
+        let s = filtered_sorted(&procs, ProcSort::Cpu, Some("--flag"));
+        assert_eq!(names(&s), vec!["Bravo"]);
     }
 }

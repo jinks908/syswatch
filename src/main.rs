@@ -5,6 +5,7 @@ mod app;
 mod collect;
 mod config;
 mod insights;
+mod snapshot;
 mod tabs;
 mod ui;
 

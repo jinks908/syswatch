@@ -11,7 +11,7 @@ mod memory;
 mod net;
 mod overview;
 mod power;
-mod procs;
+pub mod procs;
 mod services;
 mod timeline;
 

@@ -189,7 +189,7 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
     );
 }
 
-pub fn draw_footer(f: &mut Frame, area: Rect, graph_style: GraphStyle) {
+pub fn draw_footer(f: &mut Frame, area: Rect, graph_style: GraphStyle, flash: Option<&str>) {
     // Row 0: thin separator. Row 1: hotkey strip.
     let sep_area = Rect {
         x: area.x,
@@ -217,18 +217,36 @@ pub fn draw_footer(f: &mut Frame, area: Rect, graph_style: GraphStyle) {
 
     let graph_label: String = format!("Graph[{}]", graph_style.label());
     let theme_label: String = format!("Theme[{}]", crate::ui::theme::name());
+    // Footer advertises only the keys that actually do something today.
+    // Diff (D) and Record (R) are Phase 2 work; Profile (P) was an early
+    // aspiration that's now an explicit non-goal — see plan.md.
     let groups: &[&[(&str, &str)]] = &[
         &[("p", "Pause"), (",", "Settings")],
-        &[
-            ("S", "Snapshot"),
-            ("D", "Diff"),
-            ("P", "Profile"),
-            ("R", "Rec"),
-        ],
+        &[("S", "Snapshot")],
         &[("g", graph_label.as_str()), ("t", theme_label.as_str())],
         &[("/", "Filter"), ("q", "Quit"), ("1-9", "Tab")],
         &[("?", "Help")],
     ];
+    // Transient flash takes the whole footer when active — used by the
+    // S snapshot key to confirm the dump path. Cleaner than wedging it
+    // between hotkey groups.
+    if let Some(msg) = flash {
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                msg.to_string(),
+                Style::default()
+                    .fg(p::status_good())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().bg(p::bg())),
+            hot_area,
+        );
+        return;
+    }
+
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (gi, group) in groups.iter().enumerate() {
         if gi > 0 {
