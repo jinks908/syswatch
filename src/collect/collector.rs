@@ -8,6 +8,7 @@ use super::gpu::GpuDiscovery;
 use super::macos_sampler::MacosSampler;
 use super::model::*;
 use super::power::PowerCollector;
+use super::proc_bandwidth::ProcessBandwidthCollector;
 use super::services::ServicesCollector;
 
 /// Collector keeps long-lived sysinfo handles + previous-tick counters so we can
@@ -25,6 +26,7 @@ pub struct Collector {
     last_proc_io: HashMap<u32, u64>,         // pid -> cumulative read+written bytes
     gpu: GpuDiscovery,
     power: PowerCollector,
+    proc_bw: ProcessBandwidthCollector,
     services: ServicesCollector,
     host: HostInfo,
     /// Shared IOReport + SMC sampler. Both `gpu` and `power` consume
@@ -73,6 +75,7 @@ impl Collector {
             last_proc_io: HashMap::new(),
             gpu: GpuDiscovery::new(),
             power: PowerCollector::new(),
+            proc_bw: ProcessBandwidthCollector::new(),
             services: ServicesCollector::new(),
             host,
             #[cfg(target_os = "macos")]
@@ -108,7 +111,19 @@ impl Collector {
         let mem = self.collect_mem();
         let (disks, disk_io) = self.collect_disks(dt_secs);
         let net = self.collect_net(dt_secs);
-        let procs = self.collect_procs(dt_secs);
+        let mut procs = self.collect_procs(dt_secs);
+        // Per-PID bandwidth attribution. Cached at REFRESH inside the
+        // collector so we only pay the lsof/ss subprocess cost a few
+        // times a second even at 1Hz tick rates.
+        let bw = self.proc_bw.sample(&net);
+        if !bw.is_empty() {
+            for p in procs.iter_mut() {
+                if let Some((rx, tx)) = bw.get(&p.pid) {
+                    p.net_rx_rate = Some(*rx);
+                    p.net_tx_rate = Some(*tx);
+                }
+            }
+        }
         // Sample IOReport + SMC once per cycle on macOS; both `gpu` and
         // `power` read from the cached MacosTick so we don't duplicate
         // subscriptions or controller queries.
@@ -341,6 +356,10 @@ impl Collector {
                     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(p.start_time()),
                 ),
                 io_rate,
+                // Filled in by Collector::sample after collect_procs
+                // returns — proc_bandwidth's lookup is per-tick.
+                net_rx_rate: None,
+                net_tx_rate: None,
             });
         }
         self.last_proc_io = next_io;

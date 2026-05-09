@@ -152,17 +152,36 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let header = Line::from(vec![
-        Span::styled(format!("{:>7} ", "PID"), header_style()),
-        Span::styled(format!("{:>7} ", "PPID"), header_style()),
-        Span::styled(format!("{:<14} ", "USER"), header_style()),
-        Span::styled(format!("{:>6} ", "%CPU"), header_style()),
-        Span::styled(format!("{:>9} ", "RSS"), header_style()),
-        Span::styled(format!("{:>9} ", "VIRT"), header_style()),
-        Span::styled(format!("{:<5} ", "STATE"), header_style()),
-        Span::styled(format!("{:>11} ", "IO/s"), header_style()),
-        Span::styled("COMMAND", header_style()),
-    ]);
+    // Show NET RX / NET TX columns only when at least one proc has
+    // attribution data — saves 18 cols on platforms or sessions where
+    // the SDK can't enumerate connections.
+    let show_net = procs.iter().any(|p| p.net_rx_rate.is_some());
+    let header = if show_net {
+        Line::from(vec![
+            Span::styled(format!("{:>7} ", "PID"), header_style()),
+            Span::styled(format!("{:>7} ", "PPID"), header_style()),
+            Span::styled(format!("{:<14} ", "USER"), header_style()),
+            Span::styled(format!("{:>6} ", "%CPU"), header_style()),
+            Span::styled(format!("{:>9} ", "RSS"), header_style()),
+            Span::styled(format!("{:<5} ", "STATE"), header_style()),
+            Span::styled(format!("{:>11} ", "IO/s"), header_style()),
+            Span::styled(format!("{:>10} ", "NET ↓/s"), header_style()),
+            Span::styled(format!("{:>10} ", "NET ↑/s"), header_style()),
+            Span::styled("COMMAND", header_style()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!("{:>7} ", "PID"), header_style()),
+            Span::styled(format!("{:>7} ", "PPID"), header_style()),
+            Span::styled(format!("{:<14} ", "USER"), header_style()),
+            Span::styled(format!("{:>6} ", "%CPU"), header_style()),
+            Span::styled(format!("{:>9} ", "RSS"), header_style()),
+            Span::styled(format!("{:>9} ", "VIRT"), header_style()),
+            Span::styled(format!("{:<5} ", "STATE"), header_style()),
+            Span::styled(format!("{:>11} ", "IO/s"), header_style()),
+            Span::styled("COMMAND", header_style()),
+        ])
+    };
 
     let take = inner.height.saturating_sub(1) as usize;
     let sel_clamped = app.proc_sel.min(procs.len().saturating_sub(1));
@@ -195,7 +214,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
             'Z' => p::status_error(),
             _ => p::text_muted(),
         };
-        let spans = vec![
+        let mut spans: Vec<Span> = vec![
             Span::styled(
                 format!("{:>7} ", proc_.pid),
                 Style::default().fg(p::text_primary()).bg(row_bg),
@@ -216,39 +235,65 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
                 format!("{:>9} ", human_bytes(proc_.mem_rss)),
                 Style::default().fg(p::text_primary()).bg(row_bg),
             ),
-            Span::styled(
+        ];
+        // VIRT only when we don't show the net columns — with both, the
+        // row gets too wide for an 80-col terminal.
+        if !show_net {
+            spans.push(Span::styled(
                 format!("{:>9} ", human_bytes(proc_.mem_virt)),
                 Style::default().fg(p::text_muted()).bg(row_bg),
-            ),
-            Span::styled(
-                format!(" {:<4} ", proc_.state),
+            ));
+        }
+        spans.push(Span::styled(
+            format!(" {:<4} ", proc_.state),
+            Style::default()
+                .fg(state_color)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("{:>11} ", human_rate(proc_.io_rate)),
+            Style::default()
+                .fg(if proc_.io_rate > 0.0 {
+                    p::brand()
+                } else {
+                    p::text_muted()
+                })
+                .bg(row_bg),
+        ));
+        if show_net {
+            let rx = proc_.net_rx_rate.unwrap_or(0.0);
+            let tx = proc_.net_tx_rate.unwrap_or(0.0);
+            spans.push(Span::styled(
+                format!("{:>10} ", human_rate(rx)),
                 Style::default()
-                    .fg(state_color)
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:>11} ", human_rate(proc_.io_rate)),
-                Style::default()
-                    .fg(if proc_.io_rate > 0.0 {
-                        p::brand()
+                    .fg(if rx > 0.0 {
+                        p::status_good()
                     } else {
                         p::text_muted()
                     })
                     .bg(row_bg),
-            ),
-            Span::styled(
-                proc_.name.clone(),
-                Style::default().fg(p::text_primary()).bg(row_bg),
-            ),
-            // Trailing fill to extend the SEL_BG band across the row.
-            Span::styled(
-                fill(inner.width as usize, &proc_.name),
-                Style::default().bg(row_bg),
-            ),
-            // Status dot at the very start? No — append a leading dot replaces alignment. Skip.
-            Span::raw(""),
-        ];
+            ));
+            spans.push(Span::styled(
+                format!("{:>10} ", human_rate(tx)),
+                Style::default()
+                    .fg(if tx > 0.0 {
+                        p::tx_rate()
+                    } else {
+                        p::text_muted()
+                    })
+                    .bg(row_bg),
+            ));
+        }
+        spans.push(Span::styled(
+            proc_.name.clone(),
+            Style::default().fg(p::text_primary()).bg(row_bg),
+        ));
+        // Trailing fill to extend the SEL_BG band across the row.
+        spans.push(Span::styled(
+            fill(inner.width as usize, &proc_.name, show_net),
+            Style::default().bg(row_bg),
+        ));
         let _ = dot_color;
         lines.push(Line::from(spans));
     }
@@ -326,9 +371,11 @@ fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
     filtered_sorted(procs, key, None)
 }
 
-fn fill(width: usize, used: &str) -> String {
-    // 7+1 + 7+1 + 14+1 + 5+1 + 9+1 + 9+1 + 5+1 + 11+1 = 73
-    let used_w = 73 + used.chars().count();
+fn fill(width: usize, used: &str, show_net: bool) -> String {
+    // Widths: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + RSS 9+1
+    //   ± VIRT 9+1   STATE 5+1 + IO/s 11+1   ± NET ↓ 10+1 + NET ↑ 10+1
+    let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 9 + 1 + 5 + 1 + 11 + 1;
+    let used_w = base + used.chars().count() + if show_net { 10 + 1 + 10 + 1 } else { 9 + 1 };
     if width > used_w {
         std::iter::repeat(' ').take(width - used_w).collect()
     } else {
@@ -361,6 +408,8 @@ mod tests {
             state: 'S',
             start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
             io_rate: io,
+            net_rx_rate: None,
+            net_tx_rate: None,
         }
     }
 

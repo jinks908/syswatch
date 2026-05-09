@@ -186,6 +186,12 @@ pub struct ProcTick {
     pub state: char,
     pub start_time: Option<SystemTime>,
     pub io_rate: f64, // bytes/sec read + written, computed against previous tick
+    /// Per-process network rates in bytes/sec, attributed proportionally
+    /// by ESTABLISHED connection count (kernel doesn't expose true
+    /// per-PID byte accounting cheaply on either macOS or Linux). None
+    /// on platforms where the SDK can't enumerate connections.
+    pub net_rx_rate: Option<f64>,
+    pub net_tx_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
