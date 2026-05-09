@@ -5,6 +5,7 @@ pub mod macos_sampler;
 pub mod model;
 pub mod power;
 pub mod proc_bandwidth;
+pub mod proc_gpu;
 pub mod ring;
 pub mod services;
 

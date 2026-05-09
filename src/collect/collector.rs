@@ -9,6 +9,7 @@ use super::macos_sampler::MacosSampler;
 use super::model::*;
 use super::power::PowerCollector;
 use super::proc_bandwidth::ProcessBandwidthCollector;
+use super::proc_gpu::ProcGpuCollector;
 use super::services::ServicesCollector;
 
 /// Collector keeps long-lived sysinfo handles + previous-tick counters so we can
@@ -27,6 +28,7 @@ pub struct Collector {
     gpu: GpuDiscovery,
     power: PowerCollector,
     proc_bw: ProcessBandwidthCollector,
+    proc_gpu: ProcGpuCollector,
     services: ServicesCollector,
     host: HostInfo,
     /// Shared IOReport + SMC sampler. Both `gpu` and `power` consume
@@ -76,6 +78,7 @@ impl Collector {
             gpu: GpuDiscovery::new(),
             power: PowerCollector::new(),
             proc_bw: ProcessBandwidthCollector::new(),
+            proc_gpu: ProcGpuCollector::new(),
             services: ServicesCollector::new(),
             host,
             #[cfg(target_os = "macos")]
@@ -121,6 +124,17 @@ impl Collector {
                 if let Some((rx, tx)) = bw.get(&p.pid) {
                     p.net_rx_rate = Some(*rx);
                     p.net_tx_rate = Some(*tx);
+                }
+            }
+        }
+        // Per-PID GPU attribution. Linux fdinfo (AMDGPU/Intel) plus
+        // optional NVIDIA via nvml; macOS/Windows return empty.
+        let pgpu = self.proc_gpu.sample();
+        if !pgpu.is_empty() {
+            for p in procs.iter_mut() {
+                if let Some(g) = pgpu.get(&p.pid) {
+                    p.gpu_pct = g.gpu_pct;
+                    p.gpu_mem_bytes = g.gpu_mem_bytes;
                 }
             }
         }
@@ -357,9 +371,11 @@ impl Collector {
                 ),
                 io_rate,
                 // Filled in by Collector::sample after collect_procs
-                // returns — proc_bandwidth's lookup is per-tick.
+                // returns — proc_bandwidth + proc_gpu lookups are per-tick.
                 net_rx_rate: None,
                 net_tx_rate: None,
+                gpu_pct: None,
+                gpu_mem_bytes: None,
             });
         }
         self.last_proc_io = next_io;

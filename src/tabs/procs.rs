@@ -152,36 +152,36 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Show NET RX / NET TX columns only when at least one proc has
-    // attribution data — saves 18 cols on platforms or sessions where
-    // the SDK can't enumerate connections.
+    // Show NET / GPU columns only when at least one proc has data —
+    // saves columns on platforms where the source isn't available.
     let show_net = procs.iter().any(|p| p.net_rx_rate.is_some());
-    let header = if show_net {
-        Line::from(vec![
-            Span::styled(format!("{:>7} ", "PID"), header_style()),
-            Span::styled(format!("{:>7} ", "PPID"), header_style()),
-            Span::styled(format!("{:<14} ", "USER"), header_style()),
-            Span::styled(format!("{:>6} ", "%CPU"), header_style()),
-            Span::styled(format!("{:>9} ", "RSS"), header_style()),
-            Span::styled(format!("{:<5} ", "STATE"), header_style()),
-            Span::styled(format!("{:>11} ", "IO/s"), header_style()),
-            Span::styled(format!("{:>10} ", "NET ↓/s"), header_style()),
-            Span::styled(format!("{:>10} ", "NET ↑/s"), header_style()),
-            Span::styled("COMMAND", header_style()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(format!("{:>7} ", "PID"), header_style()),
-            Span::styled(format!("{:>7} ", "PPID"), header_style()),
-            Span::styled(format!("{:<14} ", "USER"), header_style()),
-            Span::styled(format!("{:>6} ", "%CPU"), header_style()),
-            Span::styled(format!("{:>9} ", "RSS"), header_style()),
-            Span::styled(format!("{:>9} ", "VIRT"), header_style()),
-            Span::styled(format!("{:<5} ", "STATE"), header_style()),
-            Span::styled(format!("{:>11} ", "IO/s"), header_style()),
-            Span::styled("COMMAND", header_style()),
-        ])
-    };
+    let show_gpu = procs
+        .iter()
+        .any(|p| p.gpu_pct.is_some() || p.gpu_mem_bytes.is_some());
+    let mut header_spans: Vec<Span> = vec![
+        Span::styled(format!("{:>7} ", "PID"), header_style()),
+        Span::styled(format!("{:>7} ", "PPID"), header_style()),
+        Span::styled(format!("{:<14} ", "USER"), header_style()),
+        Span::styled(format!("{:>6} ", "%CPU"), header_style()),
+        Span::styled(format!("{:>9} ", "RSS"), header_style()),
+    ];
+    // VIRT only when neither extras are shown — keeps the row from
+    // sprawling past 120 cols when both NET and GPU are populated.
+    if !show_net && !show_gpu {
+        header_spans.push(Span::styled(format!("{:>9} ", "VIRT"), header_style()));
+    }
+    header_spans.push(Span::styled(format!("{:<5} ", "STATE"), header_style()));
+    header_spans.push(Span::styled(format!("{:>11} ", "IO/s"), header_style()));
+    if show_net {
+        header_spans.push(Span::styled(format!("{:>10} ", "NET ↓/s"), header_style()));
+        header_spans.push(Span::styled(format!("{:>10} ", "NET ↑/s"), header_style()));
+    }
+    if show_gpu {
+        header_spans.push(Span::styled(format!("{:>5} ", "%GPU"), header_style()));
+        header_spans.push(Span::styled(format!("{:>9} ", "GPU MEM"), header_style()));
+    }
+    header_spans.push(Span::styled("COMMAND", header_style()));
+    let header = Line::from(header_spans);
 
     let take = inner.height.saturating_sub(1) as usize;
     let sel_clamped = app.proc_sel.min(procs.len().saturating_sub(1));
@@ -236,9 +236,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
                 Style::default().fg(p::text_primary()).bg(row_bg),
             ),
         ];
-        // VIRT only when we don't show the net columns — with both, the
-        // row gets too wide for an 80-col terminal.
-        if !show_net {
+        // VIRT only when neither extras are shown.
+        if !show_net && !show_gpu {
             spans.push(Span::styled(
                 format!("{:>9} ", human_bytes(proc_.mem_virt)),
                 Style::default().fg(p::text_muted()).bg(row_bg),
@@ -285,13 +284,42 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
                     .bg(row_bg),
             ));
         }
+        if show_gpu {
+            let pct = proc_.gpu_pct.unwrap_or(0.0);
+            spans.push(Span::styled(
+                format!("{:>4.0}% ", pct),
+                Style::default()
+                    .fg(if pct >= 30.0 {
+                        p::status_warn()
+                    } else if pct > 0.0 {
+                        p::brand()
+                    } else {
+                        p::text_muted()
+                    })
+                    .bg(row_bg),
+            ));
+            let mem_str = match proc_.gpu_mem_bytes {
+                Some(b) if b > 0 => human_bytes(b),
+                _ => "—".into(),
+            };
+            spans.push(Span::styled(
+                format!("{:>9} ", mem_str),
+                Style::default()
+                    .fg(if proc_.gpu_mem_bytes.is_some() {
+                        p::brand()
+                    } else {
+                        p::text_muted()
+                    })
+                    .bg(row_bg),
+            ));
+        }
         spans.push(Span::styled(
             proc_.name.clone(),
             Style::default().fg(p::text_primary()).bg(row_bg),
         ));
         // Trailing fill to extend the SEL_BG band across the row.
         spans.push(Span::styled(
-            fill(inner.width as usize, &proc_.name, show_net),
+            fill(inner.width as usize, &proc_.name, show_net, show_gpu),
             Style::default().bg(row_bg),
         ));
         let _ = dot_color;
@@ -371,11 +399,14 @@ fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
     filtered_sorted(procs, key, None)
 }
 
-fn fill(width: usize, used: &str, show_net: bool) -> String {
-    // Widths: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + RSS 9+1
-    //   ± VIRT 9+1   STATE 5+1 + IO/s 11+1   ± NET ↓ 10+1 + NET ↑ 10+1
+fn fill(width: usize, used: &str, show_net: bool, show_gpu: bool) -> String {
+    // Fixed: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + RSS 9+1
+    //        STATE 5+1 + IO/s 11+1
     let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 9 + 1 + 5 + 1 + 11 + 1;
-    let used_w = base + used.chars().count() + if show_net { 10 + 1 + 10 + 1 } else { 9 + 1 };
+    let virt_w = if !show_net && !show_gpu { 9 + 1 } else { 0 };
+    let net_w = if show_net { 10 + 1 + 10 + 1 } else { 0 };
+    let gpu_w = if show_gpu { 5 + 1 + 9 + 1 } else { 0 };
+    let used_w = base + virt_w + net_w + gpu_w + used.chars().count();
     if width > used_w {
         std::iter::repeat(' ').take(width - used_w).collect()
     } else {
@@ -410,6 +441,8 @@ mod tests {
             io_rate: io,
             net_rx_rate: None,
             net_tx_rate: None,
+            gpu_pct: None,
+            gpu_mem_bytes: None,
         }
     }
 

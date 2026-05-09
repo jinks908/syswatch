@@ -55,6 +55,7 @@ mod nvidia {
                     temp_c: None,
                     power_w: None,
                     live_data_hint: None,
+                    last_submitter_pid: None,
                 }
             })
             .collect()
@@ -144,6 +145,7 @@ impl GpuDiscovery {
                 if s.in_use_system_memory > 0 {
                     dev.vram_used_bytes = Some(s.in_use_system_memory);
                 }
+                dev.last_submitter_pid = s.last_submission_pid;
             }
 
             // IOReport+SMC values from the shared sampler. None until the
@@ -257,6 +259,7 @@ fn discover() -> Vec<GpuTick> {
                 // refresh() recomputes this on the first tick based on
                 // whether the IOReport+SMC handles initialized.
                 live_data_hint: None,
+                last_submitter_pid: None,
             }
         })
         .collect()
@@ -271,6 +274,9 @@ struct MacGpuStats {
     tiler_util_pct: f32,
     in_use_system_memory: u64,
     alloc_system_memory: u64,
+    /// From ioreg's `AGCInfo.fLastSubmissionPID` — the most recent
+    /// process to submit GPU work. Rotating hint, not a usage metric.
+    last_submission_pid: Option<u32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -285,51 +291,107 @@ fn collect_macos_gpu_stats() -> Vec<MacGpuStats> {
     parse_ioreg_perf_stats(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Parse `"PerformanceStatistics" = {"key"=val,...}` lines out of ioreg
-/// output. One entry per accelerator. Pure string work — exercised by tests.
+/// Parse one `MacGpuStats` per IOAccelerator block from ioreg output.
+///
+/// Walks the text linearly, tracking accelerator-block boundaries
+/// (`+-o ` lines from `ioreg -r -c IOAccelerator`). Within a block,
+/// pulls `PerformanceStatistics` (util / VRAM) and `AGCInfo`
+/// (`fLastSubmissionPID`) into the same struct so the per-device
+/// indices stay aligned even when a block is missing one of the keys.
 #[cfg(target_os = "macos")]
 fn parse_ioreg_perf_stats(text: &str) -> Vec<MacGpuStats> {
-    const PREFIX: &str = "\"PerformanceStatistics\" = {";
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let Some(idx) = line.find(PREFIX) else {
-            continue;
-        };
-        let body_start = idx + PREFIX.len();
-        let Some(rel_end) = line[body_start..].find('}') else {
-            continue;
-        };
-        let body = &line[body_start..body_start + rel_end];
+    const PERF_PREFIX: &str = "\"PerformanceStatistics\" = {";
+    const AGC_PREFIX: &str = "\"AGCInfo\" = {";
+    let mut out: Vec<MacGpuStats> = Vec::new();
+    let mut current: Option<MacGpuStats> = None;
 
-        let mut stats = MacGpuStats::default();
-        for pair in body.split(',') {
-            // Each pair is `"Key"=value`. Numbers only as values in the
-            // PerformanceStatistics dict, no nested commas to worry about.
-            let Some(eq) = pair.find('=') else { continue };
-            let key = pair[..eq].trim().trim_matches('"');
-            let val = pair[eq + 1..].trim();
-            match key {
-                "Device Utilization %" => {
-                    stats.device_util_pct = val.parse::<f32>().unwrap_or(0.0);
-                }
-                "Renderer Utilization %" => {
-                    stats.renderer_util_pct = val.parse::<f32>().unwrap_or(0.0);
-                }
-                "Tiler Utilization %" => {
-                    stats.tiler_util_pct = val.parse::<f32>().unwrap_or(0.0);
-                }
-                "In use system memory" => {
-                    stats.in_use_system_memory = val.parse::<u64>().unwrap_or(0);
-                }
-                "Alloc system memory" => {
-                    stats.alloc_system_memory = val.parse::<u64>().unwrap_or(0);
-                }
-                _ => {}
+    for line in text.lines() {
+        // Block boundary: `+-o IOAccelerator...` starts a new device.
+        if line.trim_start().starts_with("+-o ") {
+            if let Some(prev) = current.take() {
+                out.push(prev);
             }
+            current = Some(MacGpuStats::default());
+            continue;
         }
-        out.push(stats);
+
+        // Auto-open a block on the first content line — defensive
+        // against ioreg variants that omit the `+-o` boundary, plus
+        // simpler test inputs.
+        if current.is_none()
+            && (extract_dict_body(line, PERF_PREFIX).is_some()
+                || extract_dict_body(line, AGC_PREFIX).is_some())
+        {
+            current = Some(MacGpuStats::default());
+        }
+
+        let Some(stats) = current.as_mut() else {
+            continue;
+        };
+
+        if let Some(body) = extract_dict_body(line, PERF_PREFIX) {
+            apply_perf_stats(stats, body);
+        } else if let Some(body) = extract_dict_body(line, AGC_PREFIX) {
+            apply_agc_info(stats, body);
+        }
+    }
+    if let Some(last) = current.take() {
+        out.push(last);
     }
     out
+}
+
+/// Returns the inside-the-braces body of `"<key>" = {...}` if `prefix`
+/// matches, otherwise None.
+#[cfg(target_os = "macos")]
+fn extract_dict_body<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let idx = line.find(prefix)?;
+    let body_start = idx + prefix.len();
+    let rel_end = line[body_start..].find('}')?;
+    Some(&line[body_start..body_start + rel_end])
+}
+
+#[cfg(target_os = "macos")]
+fn apply_agc_info(stats: &mut MacGpuStats, body: &str) {
+    for pair in body.split(',') {
+        let Some(eq) = pair.find('=') else { continue };
+        let key = pair[..eq].trim().trim_matches('"');
+        let val = pair[eq + 1..].trim();
+        if key == "fLastSubmissionPID" {
+            if let Ok(p) = val.parse::<u32>() {
+                stats.last_submission_pid = Some(p);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_perf_stats(stats: &mut MacGpuStats, body: &str) {
+    for pair in body.split(',') {
+        // Each pair is `"Key"=value`. Numbers only as values in the
+        // PerformanceStatistics dict, no nested commas to worry about.
+        let Some(eq) = pair.find('=') else { continue };
+        let key = pair[..eq].trim().trim_matches('"');
+        let val = pair[eq + 1..].trim();
+        match key {
+            "Device Utilization %" => {
+                stats.device_util_pct = val.parse::<f32>().unwrap_or(0.0);
+            }
+            "Renderer Utilization %" => {
+                stats.renderer_util_pct = val.parse::<f32>().unwrap_or(0.0);
+            }
+            "Tiler Utilization %" => {
+                stats.tiler_util_pct = val.parse::<f32>().unwrap_or(0.0);
+            }
+            "In use system memory" => {
+                stats.in_use_system_memory = val.parse::<u64>().unwrap_or(0);
+            }
+            "Alloc system memory" => {
+                stats.alloc_system_memory = val.parse::<u64>().unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -398,6 +460,7 @@ fn discover() -> Vec<GpuTick> {
             temp_c: None,
             power_w: None,
             live_data_hint,
+            last_submitter_pid: None,
         });
     }
     // Replace the PCI-ID-only NVIDIA stubs with rich nvml-derived entries
@@ -585,6 +648,51 @@ mod tests {
         assert_eq!(stats.len(), 2);
         assert_eq!(stats[0].device_util_pct as i32, 10);
         assert_eq!(stats[1].device_util_pct as i32, 90);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pulls_last_submission_pid_from_agc_info() {
+        let sample = r#"
++-o AGXAcceleratorG15X
+    "AGCInfo" = {"fLastSubmissionPID"=373,"fSubmissionsSinceLastCheck"=0,"fBusyCount"=0}
+    "PerformanceStatistics" = {"Device Utilization %"=42,"In use system memory"=100}
+        "#;
+        let stats = parse_ioreg_perf_stats(sample);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].last_submission_pid, Some(373));
+        assert_eq!(stats[0].device_util_pct as i32, 42);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_agc_info_leaves_pid_none() {
+        // Block has PerfStats but no AGCInfo line.
+        let sample = r#"
++-o AGX
+    "PerformanceStatistics" = {"Device Utilization %"=10}
+        "#;
+        let stats = parse_ioreg_perf_stats(sample);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].last_submission_pid, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn agc_info_attribution_aligns_per_block() {
+        // Only the second block has AGCInfo; ensure it lands on the
+        // right device, not the first.
+        let sample = r#"
++-o A
+    "PerformanceStatistics" = {"Device Utilization %"=10}
++-o B
+    "AGCInfo" = {"fLastSubmissionPID"=999}
+    "PerformanceStatistics" = {"Device Utilization %"=90}
+        "#;
+        let stats = parse_ioreg_perf_stats(sample);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].last_submission_pid, None);
+        assert_eq!(stats[1].last_submission_pid, Some(999));
     }
 
     #[cfg(target_os = "macos")]

@@ -170,6 +170,13 @@ pub struct GpuTick {
     /// What the user can do to get live util/temp/power if it's currently
     /// missing. Empty when live data is already available.
     pub live_data_hint: Option<String>,
+    /// Apple Silicon only — the most recent PID to submit GPU work,
+    /// from ioreg's `AGCInfo.fLastSubmissionPID`. A rotating hint
+    /// rather than a usage metric (the kernel doesn't publish per-PID
+    /// cumulative GPU time without sudo or private FFI), but it
+    /// answers "anything actively touching the GPU?" which is the
+    /// most you can get on macOS without those.
+    pub last_submitter_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -192,6 +199,14 @@ pub struct ProcTick {
     /// on platforms where the SDK can't enumerate connections.
     pub net_rx_rate: Option<f64>,
     pub net_tx_rate: Option<f64>,
+    /// Per-process GPU utilization (0..100). Sourced from nvml on
+    /// Linux NVIDIA, /proc/PID/fdinfo drm-engine-* deltas on Linux
+    /// AMDGPU/Intel, None on macOS/Windows (no public per-PID API
+    /// without sudo or private FFI).
+    pub gpu_pct: Option<f32>,
+    /// Per-process GPU memory bytes — VRAM held by the process. Same
+    /// platform availability as `gpu_pct`.
+    pub gpu_mem_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

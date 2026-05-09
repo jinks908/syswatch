@@ -30,12 +30,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 
     for (i, gpu) in snap.gpus.iter().enumerate() {
         if let Some(rect) = chunks.get(i) {
-            draw_card(f, *rect, gpu, app.graph_style);
+            draw_card(f, *rect, gpu, app.graph_style, snap);
         }
     }
 }
 
-fn draw_card(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle) {
+fn draw_card(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle, snap: &Snapshot) {
     let title = format!("[{}] {}", gpu.vendor, gpu.name);
     let block = panel(title);
     let inner = block.inner(area);
@@ -47,7 +47,7 @@ fn draw_card(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle) {
         .split(inner);
 
     draw_metrics(f, cols[0], gpu, style);
-    draw_status(f, cols[1], gpu);
+    draw_status(f, cols[1], gpu, snap);
 }
 
 fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle) {
@@ -142,7 +142,7 @@ fn draw_metrics(f: &mut Frame, area: Rect, gpu: &GpuTick, style: GraphStyle) {
     );
 }
 
-fn draw_status(f: &mut Frame, area: Rect, gpu: &GpuTick) {
+fn draw_status(f: &mut Frame, area: Rect, gpu: &GpuTick, snap: &Snapshot) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(kv("vendor", gpu.vendor.clone(), p::text_primary()));
@@ -177,6 +177,23 @@ fn draw_status(f: &mut Frame, area: Rect, gpu: &GpuTick) {
             p::text_muted()
         },
     ));
+
+    // macOS-only "last submitter" hint — rotating PID from ioreg's
+    // AGCInfo dict. Honest about its limitation: this is the most
+    // recent process to submit GPU work, not a usage column.
+    if let Some(pid) = gpu.last_submitter_pid {
+        let name = snap
+            .procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "?".into());
+        lines.push(kv(
+            "last sub",
+            format!("{} (pid {})", name, pid),
+            p::text_primary(),
+        ));
+    }
 
     if let Some(hint) = &gpu.live_data_hint {
         lines.push(Line::from(""));
