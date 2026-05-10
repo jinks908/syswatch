@@ -10,7 +10,7 @@ use crate::app::{LiveState, Snapshot, TabId, ALL_TABS};
 use crate::ui::graph::GraphStyle;
 use crate::ui::palette as p;
 
-pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) {
+pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState, recording: bool) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(
         " \u{25cf}",
@@ -59,12 +59,30 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) 
         LiveState::Live => ("LIVE", p::status_good()),
         LiveState::Paused => ("PAUSE", p::status_warn()),
         LiveState::Scrub => ("SCRUB", p::status_info()),
+        LiveState::Replay => ("REPLAY", p::tx_rate()),
     };
     let ts: chrono::DateTime<chrono::Local> = snap.t.into();
-    let right = format!("\u{25cf} {}  {}", label, ts.format("%H:%M:%S"));
+    // Right side is built as multiple spans so REC (when active) can
+    // stand out in red against the live-state badge color.
+    let mut right_spans: Vec<Span> = Vec::new();
+    if recording {
+        right_spans.push(Span::styled(
+            "\u{23FA} REC  ",
+            Style::default()
+                .fg(p::status_error())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    right_spans.push(Span::styled(
+        format!("\u{25cf} {}  {}", label, ts.format("%H:%M:%S")),
+        Style::default()
+            .fg(right_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let right_text_w: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
 
     // Two paragraphs: left fills, right is a separate one-row area on the right edge.
-    let right_w = right.chars().count() as u16 + 1;
+    let right_w = right_text_w as u16 + 1;
     let left_area = Rect {
         x: area.x,
         y: area.y,
@@ -83,13 +101,7 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState) 
         left_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            right,
-            Style::default()
-                .fg(right_color)
-                .add_modifier(Modifier::BOLD),
-        )]))
-        .style(Style::default().bg(p::bg())),
+        Paragraph::new(Line::from(right_spans)).style(Style::default().bg(p::bg())),
         right_area,
     );
 }
@@ -218,11 +230,11 @@ pub fn draw_footer(f: &mut Frame, area: Rect, graph_style: GraphStyle, flash: Op
     let graph_label: String = format!("Graph[{}]", graph_style.label());
     let theme_label: String = format!("Theme[{}]", crate::ui::theme::name());
     // Footer advertises only the keys that actually do something today.
-    // Diff (D) and Record (R) are Phase 2 work; Profile (P) was an early
-    // aspiration that's now an explicit non-goal — see plan.md.
+    // Diff (D) is Phase 2 work; Profile (P) was an early aspiration
+    // that's now an explicit non-goal — see plan.md.
     let groups: &[&[(&str, &str)]] = &[
         &[("p", "Pause"), (",", "Settings")],
-        &[("S", "Snapshot")],
+        &[("S", "Snapshot"), ("R", "Record")],
         &[("g", graph_label.as_str()), ("t", theme_label.as_str())],
         &[("/", "Filter"), ("q", "Quit"), ("1-9", "Tab")],
         &[("?", "Help")],

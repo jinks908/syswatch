@@ -59,6 +59,10 @@ const GROUPS: &[Group] = &[
                 label: "Snapshot current sample → JSON file",
             },
             Row {
+                keys: "R",
+                label: "Toggle session recording → .swr file",
+            },
+            Row {
                 keys: "?",
                 label: "Toggle this help",
             },

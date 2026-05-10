@@ -5,6 +5,7 @@ mod app;
 mod collect;
 mod config;
 mod insights;
+mod recording;
 mod snapshot;
 mod tabs;
 mod ui;
@@ -26,6 +27,12 @@ struct Cli {
     /// Overrides the saved config.default_tab when supplied.
     #[arg(long)]
     tab: Option<String>,
+
+    /// Replay a previously-recorded session (.swr file, written by
+    /// pressing `R` during a live run). No live collection happens —
+    /// arrow keys / Home / End scrub through the recorded ticks.
+    #[arg(long, value_name = "PATH")]
+    replay: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -46,8 +53,31 @@ fn main() -> Result<()> {
     // CLI --tab wins; otherwise fall back to the persisted default.
     let start_tab = cli.tab.or_else(|| Some(cfg.default_tab.clone()));
 
+    // Replay mode: load the recording and hand it to the run loop
+    // instead of opening a live Collector. Default-tab override goes
+    // to Timeline since that's where scrubbing lives.
+    let replay = if let Some(path) = cli.replay {
+        let snaps = recording::read(&path)
+            .map_err(|e| anyhow::anyhow!("could not read recording {}: {}", path.display(), e))?;
+        if snaps.is_empty() {
+            return Err(anyhow::anyhow!(
+                "recording {} contains no snapshots",
+                path.display()
+            ));
+        }
+        eprintln!(
+            "syswatch: replaying {} snapshots from {}",
+            snaps.len(),
+            path.display()
+        );
+        Some(snaps)
+    } else {
+        None
+    };
+
     app::run(app::Options {
         start_tab,
         config: cfg,
+        replay,
     })
 }

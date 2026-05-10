@@ -26,6 +26,10 @@ pub struct Options {
     /// Source of truth for tick_ms / theme / graph_style / default_tab.
     /// CLI overrides are applied to this struct in main() before handoff.
     pub config: SyswatchConfig,
+    /// Pre-loaded snapshots from a `--replay` invocation. When Some,
+    /// the run loop skips live collection entirely and the user
+    /// scrubs through the recorded ticks instead.
+    pub replay: Option<Vec<Snapshot>>,
 }
 
 pub struct History {
@@ -262,6 +266,9 @@ pub enum LiveState {
     Live,
     Paused,
     Scrub,
+    /// Replay mode — `--replay path.swr` was passed. No live data,
+    /// the scrubber walks recorded snapshots.
+    Replay,
 }
 
 pub struct App {
@@ -321,6 +328,14 @@ pub struct App {
     /// Currently-applied filter (case-insensitive substring match
     /// against name/cmd/user). None means no filter.
     pub proc_filter_active: Option<String>,
+
+    /// Active session recorder, when the user has pressed `R`. None
+    /// means not recording. Drop on quit flushes the buffered tail.
+    pub recorder: Option<crate::recording::Recorder>,
+
+    /// True when the app was launched with --replay; suppresses live
+    /// collection and changes the LiveState badge.
+    pub replay_mode: bool,
 }
 
 impl App {
@@ -332,6 +347,9 @@ impl App {
         }
     }
     pub fn live_state(&self) -> LiveState {
+        if self.replay_mode {
+            return LiveState::Replay;
+        }
         if self.scrub_offset > 0 {
             LiveState::Scrub
         } else if self.paused {
@@ -373,6 +391,8 @@ impl App {
             proc_filter_input: false,
             proc_filter_buf: String::new(),
             proc_filter_active: None,
+            recorder: None,
+            replay_mode: false,
         }
     }
 
@@ -461,6 +481,30 @@ impl App {
                         Err(e) => format!("snapshot failed: {}", e),
                     },
                     None => "no snapshot yet — wait for first sample".into(),
+                };
+                self.footer_flash = Some((msg, Instant::now() + Duration::from_secs(3)));
+            }
+            (KeyCode::Char('R'), _) => {
+                // Toggle session recording. Each tick after start gets
+                // appended; pressing R again (or quitting) flushes and
+                // closes the file.
+                let msg = if let Some(rec) = self.recorder.take() {
+                    let path = rec.path().display().to_string();
+                    let count = rec.count;
+                    drop(rec); // explicit flush via Drop
+                    format!("recording stopped → {} ({} ticks)", path, count)
+                } else {
+                    match crate::recording::fresh_path() {
+                        Some(p) => match crate::recording::Recorder::create(p) {
+                            Ok(rec) => {
+                                let path = rec.path().display().to_string();
+                                self.recorder = Some(rec);
+                                format!("recording → {}", path)
+                            }
+                            Err(e) => format!("recording failed: {}", e),
+                        },
+                        None => "cannot determine local data dir".into(),
+                    }
                 };
                 self.footer_flash = Some((msg, Instant::now() + Duration::from_secs(3)));
             }
@@ -659,13 +703,54 @@ fn prev_tab(t: TabId) -> TabId {
 }
 
 pub fn run(opts: Options) -> Result<()> {
+    // Replay mode forces Timeline as the starting tab — that's where
+    // the scrubber lives — unless the user explicitly passed --tab.
+    let user_picked_tab = opts.start_tab.is_some();
     let start = opts
         .start_tab
         .as_deref()
         .and_then(TabId::from_str_loose)
         .unwrap_or(TabId::Overview);
+    let start = if opts.replay.is_some() && !user_picked_tab {
+        TabId::Timeline
+    } else {
+        start
+    };
+
     let mut app = App::new(start, opts.config);
-    let mut collector = Collector::new();
+
+    // Populate History from the recording up front, then plant the
+    // scrubber at oldest tick so the user sees the start. Live
+    // collection is skipped entirely in replay mode.
+    if let Some(snaps) = opts.replay {
+        app.replay_mode = true;
+        // Resize the History rings if needed so the entire recording
+        // fits — default cap is 120 ticks; sessions longer than that
+        // would otherwise lose the head on push.
+        let needed = snaps.len().max(120);
+        app.history = History::new(needed);
+        for s in &snaps {
+            app.history.push(s);
+        }
+        // Park scrubber at the oldest tick so the user explores
+        // forward through the recording.
+        app.scrub_offset = app.history.session.len().saturating_sub(1);
+        app.snap = snaps.last().cloned();
+        app.insights = if let Some(last) = snaps.last() {
+            insights::compute(&app.history, last)
+        } else {
+            Vec::new()
+        };
+    }
+
+    // Skip collector setup in replay mode — IOReport / system_profiler
+    // / ioreg probes do real work we don't need when there's no live
+    // sampling to do.
+    let mut collector: Option<Collector> = if app.replay_mode {
+        None
+    } else {
+        Some(Collector::new())
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -685,10 +770,25 @@ pub fn run(opts: Options) -> Result<()> {
         let tick = Duration::from_millis(app.user_config.tick_ms.clamp(100, 5000));
         if last_tick.elapsed() >= tick {
             if !app.paused {
-                let s = collector.sample();
-                app.history.push(&s);
-                app.insights = insights::compute(&app.history, &s);
-                app.snap = Some(s);
+                if let Some(c) = collector.as_mut() {
+                    let s = c.sample();
+                    app.history.push(&s);
+                    app.insights = insights::compute(&app.history, &s);
+                    // Append to active recording (best-effort — we
+                    // don't want one bad write to brick the live UI).
+                    if let Some(rec) = app.recorder.as_mut() {
+                        if let Err(e) = rec.push(&s) {
+                            app.footer_flash = Some((
+                                format!("recording: {}", e),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                            app.recorder = None;
+                        }
+                    }
+                    app.snap = Some(s);
+                }
+                // Replay mode: nothing to sample, the History ring is
+                // pre-populated and the scrubber drives displayed_snap.
             }
             last_tick = Instant::now();
         }
@@ -732,7 +832,7 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
         ])
         .split(area);
 
-    chrome::draw_header(f, chunks[0], snap, app.live_state());
+    chrome::draw_header(f, chunks[0], snap, app.live_state(), app.recorder.is_some());
     let active_insights = app
         .insights
         .iter()

@@ -1,6 +1,6 @@
 [package]
 name = "syswatch"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 description = "Single-host, read-only system diagnostics TUI. Twelve tabs covering CPU, memory, disks, processes, GPU, power, services, network, plus a Timeline scrubber and an Insights anomaly engine. Sibling to netwatch."
 license = "MIT"
@@ -41,6 +41,11 @@ chrono = { version = "0.4", features = ["serde"] }
 netwatch-sdk = "0.1"
 toml = "0.8"
 dirs = "5"
+# Compact binary serialization for session recordings (.swr files).
+# Length-prefixed Snapshot stream — chosen over rkyv for ergonomic
+# Vec/Option/String handling at the cost of zero-copy reads we don't
+# need for this workload.
+postcard = { version = "1", features = ["use-std"] }
 
 # Linux NVIDIA support is opt-in: enabling `gpu-nvidia` links libnvidia-ml,
 # which only ships on hosts with the proprietary driver installed.

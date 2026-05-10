@@ -5,7 +5,7 @@
 
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HostInfo {
     pub hostname: String,
     pub os: String,
@@ -14,7 +14,7 @@ pub struct HostInfo {
     pub cpu_cores: u32,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CpuTick {
     pub load_1: f32,
     pub load_5: f32,
@@ -23,7 +23,7 @@ pub struct CpuTick {
     pub per_core: Vec<f32>, // 0..100 per logical core
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MemTick {
     pub total_bytes: u64,
     pub used_bytes: u64,
@@ -32,7 +32,7 @@ pub struct MemTick {
     pub swap_used_bytes: u64,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskUsageTick {
     pub mount_point: String,
     pub device: String,
@@ -43,7 +43,7 @@ pub struct DiskUsageTick {
     pub usage_pct: f32,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskIoTick {
     pub read_bytes_total: u64,
     pub write_bytes_total: u64,
@@ -51,7 +51,7 @@ pub struct DiskIoTick {
     pub write_rate: f64,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct InterfaceTick {
     pub name: String,
     pub is_up: bool,
@@ -61,7 +61,7 @@ pub struct InterfaceTick {
     pub tx_rate: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ServiceStatus {
     Running,
     Idle,
@@ -81,7 +81,7 @@ impl ServiceStatus {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ServiceTick {
     pub name: String,
     pub status: ServiceStatus,
@@ -92,7 +92,7 @@ pub struct ServiceTick {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PowerSource {
     Ac,
     Battery,
@@ -110,7 +110,7 @@ impl PowerSource {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BatteryTick {
     pub charge_pct: f32, // 0..100
     pub is_charging: bool,
@@ -123,20 +123,20 @@ pub struct BatteryTick {
     pub amperage_ma: Option<i32>, // signed: positive = charging, negative = discharging
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ThermalZone {
     pub name: String,
     pub temp_c: f32,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FanTick {
     pub name: String,
     pub rpm: u32,
     pub target_rpm: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PowerTick {
     pub source: PowerSource,
     pub battery: Option<BatteryTick>,
@@ -152,7 +152,7 @@ pub struct PowerTick {
     pub live_data_hint: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GpuTick {
     pub name: String,
     pub vendor: String,
@@ -179,7 +179,7 @@ pub struct GpuTick {
     pub last_submitter_pid: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProcTick {
     pub pid: u32,
     pub ppid: u32,
@@ -209,7 +209,7 @@ pub struct ProcTick {
     pub gpu_mem_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub t: SystemTime,
     pub host: HostInfo,
