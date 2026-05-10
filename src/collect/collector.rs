@@ -21,6 +21,13 @@ pub struct Collector {
     nets: Networks,
     users: Users,
     last_tick: Option<Instant>,
+    /// Last time we drove `sys.refresh_processes_specifics`. The
+    /// process refresh is the most expensive sysinfo call (10–50 ms
+    /// on a 1 k-proc box), so we cap its rate independently of the
+    /// outer tick. Cached process state stays valid between
+    /// refreshes — sysinfo's cpu_usage() returns the last computed
+    /// delta until the next refresh.
+    last_procs_refresh: Option<Instant>,
     last_disk_read: u64,
     last_disk_write: u64,
     last_iface: HashMap<String, (u64, u64)>, // name -> (rx, tx)
@@ -71,6 +78,7 @@ impl Collector {
             nets,
             users,
             last_tick: None,
+            last_procs_refresh: None,
             last_disk_read: 0,
             last_disk_write: 0,
             last_iface: HashMap::new(),
@@ -99,14 +107,26 @@ impl Collector {
             .unwrap_or(1.0);
         self.last_tick = Some(now);
 
-        // sysinfo refresh: cpu/mem/processes/disks/networks.
+        // sysinfo refresh: cpu/mem/processes/disks/networks. CPU and
+        // memory are cheap and tick every iteration; the process list
+        // is heavy and refreshes on its own ~1.5 s budget so the outer
+        // loop can run at sub-second tick rates without paying for a
+        // full process scan every frame.
         self.sys.refresh_cpu_all();
         self.sys.refresh_memory();
-        self.sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything(),
-        );
+        const PROCS_REFRESH: std::time::Duration = std::time::Duration::from_millis(1500);
+        let procs_stale = self
+            .last_procs_refresh
+            .map(|t| now.duration_since(t) >= PROCS_REFRESH)
+            .unwrap_or(true);
+        if procs_stale {
+            self.sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::everything(),
+            );
+            self.last_procs_refresh = Some(now);
+        }
         self.disks.refresh();
         self.nets.refresh();
 

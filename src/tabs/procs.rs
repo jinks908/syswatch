@@ -73,6 +73,19 @@ fn sort_in_place(out: &mut [ProcTick], key: ProcSort) {
         }),
         ProcSort::Start => out.sort_by(|a, b| b.start_time.cmp(&a.start_time)),
         ProcSort::Name => out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        ProcSort::Gpu => out.sort_by(|a, b| {
+            // None → 0.0 so procs without GPU attribution sink to the
+            // bottom rather than appearing as a top match.
+            let av = a.gpu_pct.unwrap_or(0.0);
+            let bv = b.gpu_pct.unwrap_or(0.0);
+            bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        ProcSort::Net => out.sort_by(|a, b| {
+            let total = |p: &ProcTick| p.net_rx_rate.unwrap_or(0.0) + p.net_tx_rate.unwrap_or(0.0);
+            total(b)
+                .partial_cmp(&total(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
     }
 }
 
@@ -504,6 +517,52 @@ mod tests {
         let original_first = input[0].name.clone();
         let _ = sort_procs(&input, ProcSort::Cpu);
         assert_eq!(input[0].name, original_first);
+    }
+
+    // ── Gpu / Net sort ──────────────────────────────────────────────────
+
+    fn fixture_with_gpu_net() -> Vec<ProcTick> {
+        let mut v = fixture();
+        // alpha: 0% GPU, no net
+        // Bravo: 95% GPU, 1MB/s net
+        v[1].gpu_pct = Some(95.0);
+        v[1].net_rx_rate = Some(800_000.0);
+        v[1].net_tx_rate = Some(200_000.0);
+        // charlie: 5% GPU, 200KB/s net
+        v[2].gpu_pct = Some(5.0);
+        v[2].net_rx_rate = Some(50_000.0);
+        v[2].net_tx_rate = Some(150_000.0);
+        // delta: no GPU/net data
+        v
+    }
+
+    #[test]
+    fn sort_by_gpu_descending_with_none_at_bottom() {
+        let s = sort_procs(&fixture_with_gpu_net(), ProcSort::Gpu);
+        // Bravo (95) > charlie (5) > {alpha, delta} (None → 0; their
+        // relative order is whatever the sort happens to produce, but
+        // they must come after the procs with values).
+        assert_eq!(s[0].name, "Bravo");
+        assert_eq!(s[1].name, "charlie");
+        let tail: Vec<&str> = s[2..].iter().map(|p| p.name.as_str()).collect();
+        assert!(tail.contains(&"alpha"));
+        assert!(tail.contains(&"delta"));
+    }
+
+    #[test]
+    fn sort_by_net_uses_combined_rx_plus_tx() {
+        let s = sort_procs(&fixture_with_gpu_net(), ProcSort::Net);
+        // Bravo total = 1_000_000; charlie = 200_000; alpha/delta = 0.
+        assert_eq!(s[0].name, "Bravo");
+        assert_eq!(s[1].name, "charlie");
+    }
+
+    #[test]
+    fn proc_sort_cycle_visits_gpu_and_net() {
+        // ProcSort::ALL must include the new variants.
+        let labels: Vec<&str> = ProcSort::ALL.iter().map(|s| s.label()).collect();
+        assert!(labels.contains(&"gpu"));
+        assert!(labels.contains(&"net"));
     }
 
     // ── filter behavior ─────────────────────────────────────────────────

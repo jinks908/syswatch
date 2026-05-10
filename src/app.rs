@@ -198,6 +198,11 @@ pub enum ProcSort {
     Io,
     Start,
     Name,
+    /// %GPU desc — None values sort to the bottom so platforms
+    /// without per-PID GPU data don't put empty rows at the top.
+    Gpu,
+    /// Combined net rx+tx desc — same None-to-bottom rule.
+    Net,
 }
 
 impl ProcSort {
@@ -208,14 +213,18 @@ impl ProcSort {
             ProcSort::Io => "io",
             ProcSort::Start => "start",
             ProcSort::Name => "name",
+            ProcSort::Gpu => "gpu",
+            ProcSort::Net => "net",
         }
     }
-    pub const ALL: [ProcSort; 5] = [
+    pub const ALL: [ProcSort; 7] = [
         ProcSort::Cpu,
         ProcSort::Rss,
         ProcSort::Io,
         ProcSort::Start,
         ProcSort::Name,
+        ProcSort::Gpu,
+        ProcSort::Net,
     ];
     fn next(self) -> ProcSort {
         let i = ProcSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
