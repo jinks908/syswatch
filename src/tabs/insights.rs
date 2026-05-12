@@ -266,3 +266,65 @@ fn pad_right(width: usize, used: usize, right_reserve: usize) -> String {
     let target = width.saturating_sub(used).saturating_sub(right_reserve);
     " ".repeat(target)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_no_op_when_shorter_than_max() {
+        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn truncate_no_op_when_exact_length() {
+        assert_eq!(truncate("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis_when_longer() {
+        // max=5: keep 4 chars, append ellipsis → 5 user-perceived chars.
+        assert_eq!(truncate("abcdefghij", 5), "abcd\u{2026}");
+    }
+
+    #[test]
+    fn truncate_max_one_hard_cuts_no_ellipsis() {
+        // The ellipsis itself would consume the only slot, so the
+        // function hard-cuts in this regime.
+        assert_eq!(truncate("abcdef", 1), "a");
+    }
+
+    #[test]
+    fn truncate_max_zero_yields_empty() {
+        assert_eq!(truncate("abcdef", 0), "");
+    }
+
+    #[test]
+    fn truncate_counts_codepoints_not_bytes() {
+        // 'é' is 1 codepoint but 2 UTF-8 bytes — counting chars means
+        // multibyte strings don't get cut mid-codepoint.
+        let s = "éééééé";
+        assert_eq!(truncate(s, 6), s);
+        assert_eq!(truncate(s, 3), "éé\u{2026}");
+    }
+
+    #[test]
+    fn pad_right_emits_remaining_spaces() {
+        // width 20, used 5, reserved 3 → 12 spaces left.
+        let out = pad_right(20, 5, 3);
+        assert_eq!(out.len(), 12);
+        assert!(out.chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn pad_right_saturates_to_zero_when_used_exceeds_width() {
+        assert_eq!(pad_right(10, 20, 0), "");
+    }
+
+    #[test]
+    fn pad_right_saturates_when_reserve_exceeds_remaining() {
+        // width=10, used=5, right_reserve=20 → underflow → 0.
+        assert_eq!(pad_right(10, 5, 20), "");
+    }
+}

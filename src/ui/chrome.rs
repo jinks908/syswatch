@@ -294,3 +294,43 @@ fn format_uptime(secs: u64) -> String {
         format!("{:02}:{:02}:{:02}", h, m, s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_uptime_under_day_uses_hms() {
+        assert_eq!(format_uptime(0), "00:00:00");
+        assert_eq!(format_uptime(59), "00:00:59");
+        assert_eq!(format_uptime(60), "00:01:00");
+        assert_eq!(format_uptime(3661), "01:01:01");
+    }
+
+    #[test]
+    fn format_uptime_last_second_before_day_rollover() {
+        // 86399 = 23:59:59 — final second before the day-format takes over.
+        assert_eq!(format_uptime(86_399), "23:59:59");
+    }
+
+    #[test]
+    fn format_uptime_one_day_drops_seconds() {
+        // The day format intentionally hides seconds — at this scale the
+        // header has too much else to fit and second-precision is noise.
+        assert_eq!(format_uptime(86_400), "1d 00:00");
+    }
+
+    #[test]
+    fn format_uptime_multi_day_composition() {
+        // 3 days, 4 hours, 5 minutes (+ 6 seconds that should drop).
+        let secs = 3 * 86_400 + 4 * 3600 + 5 * 60 + 6;
+        assert_eq!(format_uptime(secs), "3d 04:05");
+    }
+
+    #[test]
+    fn format_uptime_zero_pads_hms_components() {
+        // Single-digit hours/minutes must zero-pad so column alignment
+        // doesn't shift across ticks in the header.
+        assert_eq!(format_uptime(3600), "01:00:00");
+    }
+}

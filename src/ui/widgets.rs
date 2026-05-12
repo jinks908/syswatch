@@ -117,3 +117,62 @@ pub fn human_bytes(b: u64) -> String {
 pub fn human_rate(b_per_s: f64) -> String {
     format!("{}/s", human_bytes(b_per_s as u64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_zero() {
+        assert_eq!(human_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn human_bytes_under_one_kib_renders_as_bytes_no_decimal() {
+        // The < 1024 branch uses the integer count, not the float — so
+        // no ".0" sneaks in for small byte counts.
+        assert_eq!(human_bytes(1), "1 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn human_bytes_one_kib_rolls_to_kb_unit_with_decimal() {
+        // Roll-over from B → KB is the most common formatting bug.
+        assert_eq!(human_bytes(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn human_bytes_progresses_through_units() {
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(human_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+        assert_eq!(human_bytes(3u64 * 1024 * 1024 * 1024 * 1024), "3.0 TB");
+    }
+
+    #[test]
+    fn human_bytes_caps_at_pb_for_max_u64() {
+        // The loop guard `i + 1 < UNITS.len()` must not overshoot the
+        // unit table even for absurd input.
+        let s = human_bytes(u64::MAX);
+        assert!(s.ends_with(" PB"), "got {s}");
+    }
+
+    #[test]
+    fn human_rate_zero() {
+        assert_eq!(human_rate(0.0), "0 B/s");
+    }
+
+    #[test]
+    fn human_rate_appends_per_second() {
+        assert_eq!(human_rate(1024.0), "1.0 KB/s");
+        assert_eq!(human_rate(1024.0 * 1024.0), "1.0 MB/s");
+    }
+
+    #[test]
+    fn human_rate_truncates_fractional_bytes() {
+        // The f64 → u64 cast floors. Sub-byte rates render as "0 B/s",
+        // not a fractional byte count.
+        assert_eq!(human_rate(0.7), "0 B/s");
+    }
+}

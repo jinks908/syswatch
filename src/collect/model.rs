@@ -241,3 +241,36 @@ impl Default for Snapshot {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_status_labels() {
+        assert_eq!(ServiceStatus::Running.label(), "Running");
+        assert_eq!(ServiceStatus::Idle.label(), "Idle");
+        assert_eq!(ServiceStatus::Failed.label(), "Failed");
+        assert_eq!(ServiceStatus::Unknown.label(), "Unknown");
+    }
+
+    #[test]
+    fn service_status_default_is_unknown() {
+        // The default exists because most collectors emit Unknown when
+        // the platform layer can't classify a unit; lock that in so a
+        // future variant reorder doesn't silently change behavior.
+        assert_eq!(ServiceStatus::default(), ServiceStatus::Unknown);
+    }
+
+    #[test]
+    fn power_source_labels() {
+        assert_eq!(PowerSource::Ac.label(), "AC");
+        assert_eq!(PowerSource::Battery.label(), "Battery");
+        assert_eq!(PowerSource::Unknown.label(), "Unknown");
+    }
+
+    #[test]
+    fn power_source_default_is_unknown() {
+        assert_eq!(PowerSource::default(), PowerSource::Unknown);
+    }
+}

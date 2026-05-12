@@ -126,3 +126,18 @@ fn header_style() -> Style {
         .fg(p::text_muted())
         .add_modifier(Modifier::BOLD)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_color_thresholds() {
+        assert_eq!(bar_color(0.0), p::status_good());
+        assert_eq!(bar_color(69.9), p::status_good());
+        assert_eq!(bar_color(70.0), p::status_warn());
+        assert_eq!(bar_color(89.9), p::status_warn());
+        assert_eq!(bar_color(90.0), p::status_error());
+        assert_eq!(bar_color(100.0), p::status_error());
+    }
+}

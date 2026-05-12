@@ -395,3 +395,165 @@ fn kv(k: &str, v: String, val_color: ratatui::style::Color) -> Line<'static> {
         Span::styled(v, Style::default().fg(val_color)),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_text_fully_charged_wins_over_charging_flag() {
+        let b = BatteryTick {
+            fully_charged: true,
+            is_charging: true,
+            amperage_ma: Some(1500),
+            ..BatteryTick::default()
+        };
+        assert_eq!(state_text(&b), "fully charged");
+    }
+
+    #[test]
+    fn state_text_charging_with_amperage_formats_amps() {
+        let b = BatteryTick {
+            is_charging: true,
+            amperage_ma: Some(1500),
+            ..BatteryTick::default()
+        };
+        assert_eq!(state_text(&b), "charging @ 1.5 A");
+    }
+
+    #[test]
+    fn state_text_charging_without_amperage_drops_suffix() {
+        let b = BatteryTick {
+            is_charging: true,
+            amperage_ma: None,
+            ..BatteryTick::default()
+        };
+        assert_eq!(state_text(&b), "charging");
+    }
+
+    #[test]
+    fn state_text_discharging_renders_amperage_magnitude() {
+        // Discharging reports negative amperage; the user-facing string
+        // should show the magnitude, not the sign.
+        let b = BatteryTick {
+            is_charging: false,
+            amperage_ma: Some(-2000),
+            ..BatteryTick::default()
+        };
+        assert_eq!(state_text(&b), "discharging @ 2.0 A");
+    }
+
+    #[test]
+    fn state_text_discharging_without_amperage() {
+        let b = BatteryTick::default();
+        assert_eq!(state_text(&b), "discharging");
+    }
+
+    #[test]
+    fn charge_color_charging_uses_brand_regardless_of_pct() {
+        // A 5% battery on AC shouldn't render red.
+        assert_eq!(charge_color(5.0, true), p::brand());
+        assert_eq!(charge_color(95.0, true), p::brand());
+    }
+
+    #[test]
+    fn charge_color_discharging_thresholds() {
+        assert_eq!(charge_color(0.0, false), p::status_error());
+        assert_eq!(charge_color(15.0, false), p::status_error());
+        assert_eq!(charge_color(15.5, false), p::status_warn());
+        assert_eq!(charge_color(30.0, false), p::status_warn());
+        assert_eq!(charge_color(30.5, false), p::status_good());
+        assert_eq!(charge_color(100.0, false), p::status_good());
+    }
+
+    // ── TestBackend rendering tests ─────────────────────────
+    //
+    // Exercise the ratatui draw pipeline against an in-memory backend
+    // and assert on the resulting buffer text. Catches layout/content
+    // regressions that pure-helper tests can't see. Pattern is portable:
+    // any tab's private draw_* fn that takes a tick + style can be
+    // tested this way without constructing a full App.
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn draw_battery_renders_fallback_when_battery_absent() {
+        // No battery (desktop / VM) — must surface a user-readable
+        // explanation, not just an empty panel.
+        let pwr = PowerTick::default();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_battery(f, f.area(), &pwr, GraphStyle::Bars);
+            })
+            .unwrap();
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("BATTERY"), "missing panel title:\n{text}");
+        assert!(
+            text.contains("No battery detected"),
+            "missing fallback line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn draw_battery_renders_percentage_and_charging_state() {
+        // Charging at 73% with 1.5A draw — the panel should surface
+        // the percentage, the "charging" state, and the amperage suffix.
+        let pwr = PowerTick {
+            battery: Some(BatteryTick {
+                charge_pct: 73.0,
+                is_charging: true,
+                amperage_ma: Some(1500),
+                ..BatteryTick::default()
+            }),
+            ..PowerTick::default()
+        };
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_battery(f, f.area(), &pwr, GraphStyle::Bars);
+            })
+            .unwrap();
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("73%"), "missing percentage:\n{text}");
+        assert!(text.contains("charging"), "missing state:\n{text}");
+        assert!(text.contains("1.5 A"), "missing amperage suffix:\n{text}");
+    }
+
+    #[test]
+    fn draw_status_renders_throttle_text_for_known_state() {
+        let pwr = PowerTick {
+            source: PowerSource::Battery,
+            thermal_throttle_pct: Some(100),
+            ..PowerTick::default()
+        };
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_status(f, f.area(), &pwr);
+            })
+            .unwrap();
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("POWER STATUS"), "missing panel title:\n{text}");
+        assert!(text.contains("Battery"), "missing source label:\n{text}");
+        assert!(text.contains("no throttle"), "missing throttle label:\n{text}");
+    }
+}

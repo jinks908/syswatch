@@ -277,3 +277,18 @@ fn util_color(u: f32) -> ratatui::style::Color {
         p::status_good()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn util_color_thresholds() {
+        assert_eq!(util_color(0.0), p::status_good());
+        assert_eq!(util_color(59.9), p::status_good());
+        assert_eq!(util_color(60.0), p::status_warn());
+        assert_eq!(util_color(84.9), p::status_warn());
+        assert_eq!(util_color(85.0), p::status_error());
+        assert_eq!(util_color(100.0), p::status_error());
+    }
+}

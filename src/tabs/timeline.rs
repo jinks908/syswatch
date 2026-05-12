@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Snapshot};
-use crate::insights::Severity;
+use crate::insights::{Insight, Severity};
 use crate::ui::{
     palette as p,
     widgets::{panel, sparkline},
@@ -125,7 +125,8 @@ fn draw_events(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let events = derive_events(app);
+    let session = app.history.session.to_vec();
+    let events = derive_events(&session, &app.insights);
     if events.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
@@ -271,12 +272,11 @@ struct Event {
     detail: String,
 }
 
-fn derive_events(app: &App) -> Vec<Event> {
+fn derive_events(session: &[Snapshot], insights: &[Insight]) -> Vec<Event> {
     // Walk the session, comparing adjacent snapshots for top-proc changes.
     // Insight transitions need recomputing the insight set per tick — too
     // expensive for now, so we surface only the *current* active insights and
     // top-proc churn from the session.
-    let session: Vec<Snapshot> = app.history.session.to_vec();
     if session.len() < 2 {
         return Vec::new();
     }
@@ -313,7 +313,7 @@ fn derive_events(app: &App) -> Vec<Event> {
     }
 
     // Currently active insights — surface as ongoing events at age 0.
-    for ins in &app.insights {
+    for ins in insights {
         if ins.severity == Severity::Info {
             continue;
         }
@@ -343,4 +343,255 @@ fn header_style() -> Style {
     Style::default()
         .fg(p::text_muted())
         .add_modifier(Modifier::BOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_normalized_empty_input_yields_empty() {
+        assert!(window_normalized(&[], 10, 100.0).is_empty());
+    }
+
+    #[test]
+    fn window_normalized_zero_max_avoids_division_by_zero() {
+        // When the peak is 0 (e.g. a freshly-started session with no
+        // activity yet), max gets clamped to 1.0 so we don't NaN out.
+        let out = window_normalized(&[0.0, 0.0, 0.0], 10, 0.0);
+        assert_eq!(out, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn window_normalized_negative_max_treated_as_safe() {
+        // Negative max isn't a real case but the guard `max > 0.0` rejects
+        // it the same way as zero, so the output should still be sane.
+        let out = window_normalized(&[0.5], 10, -5.0);
+        assert_eq!(out, vec![0.5]);
+    }
+
+    #[test]
+    fn window_normalized_takes_tail_when_raw_exceeds_take() {
+        let raw = [10.0, 20.0, 25.0, 50.0, 75.0];
+        let out = window_normalized(&raw, 3, 100.0);
+        assert_eq!(out, vec![0.25, 0.5, 0.75]);
+    }
+
+    #[test]
+    fn window_normalized_returns_full_input_when_shorter_than_take() {
+        let raw = [25.0, 50.0];
+        let out = window_normalized(&raw, 10, 100.0);
+        assert_eq!(out, vec![0.25, 0.5]);
+    }
+
+    #[test]
+    fn window_normalized_clamps_values_above_max_to_one() {
+        let out = window_normalized(&[150.0, 50.0], 10, 100.0);
+        assert_eq!(out, vec![1.0, 0.5]);
+    }
+
+    #[test]
+    fn window_normalized_clamps_negative_values_to_zero() {
+        let out = window_normalized(&[-10.0, 50.0], 10, 100.0);
+        assert_eq!(out, vec![0.0, 0.5]);
+    }
+
+    #[test]
+    fn mark_cursor_no_op_when_scrub_past_series_end() {
+        // scrub_offset beyond series length must not panic and must not
+        // corrupt spans — important since scrub state and series len are
+        // independent and can briefly disagree across resamples.
+        let label = Span::styled("cpu  ", Style::default());
+        let spark = Span::styled("▁▂▃▄▅".to_string(), Style::default());
+        let mut spans = vec![label.clone(), spark.clone()];
+        mark_cursor(&mut spans, 5, 100, p::brand());
+        assert_eq!(spans[1].content, spark.content);
+    }
+
+    #[test]
+    fn mark_cursor_no_op_on_empty_series() {
+        let mut spans = vec![Span::styled("cpu  ", Style::default())];
+        mark_cursor(&mut spans, 0, 0, p::brand());
+        // No second span to touch; just confirm we don't panic.
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn mark_cursor_replaces_cell_with_vertical_bar() {
+        // 5-char sparkline, scrub_offset 2 → cursor_idx = 5 - 1 - 2 = 2.
+        let label = Span::styled("cpu  ", Style::default());
+        let spark = Span::styled("abcde".to_string(), Style::default());
+        let mut spans = vec![label, spark];
+        mark_cursor(&mut spans, 5, 2, p::brand());
+        let chars: Vec<char> = spans[1].content.chars().collect();
+        assert_eq!(chars[2], '\u{2503}');
+        // Other positions untouched.
+        assert_eq!(chars[0], 'a');
+        assert_eq!(chars[1], 'b');
+        assert_eq!(chars[3], 'd');
+        assert_eq!(chars[4], 'e');
+    }
+
+    // ── derive_events ──────────────────────────────────────
+    //
+    // Invariant-style tests covering the cases proptest would generate.
+    // Adding the `proptest` dev-dep would give true generative coverage,
+    // but the function's input space is small enough that hand-rolled
+    // cases hit the same invariants without the dependency.
+
+    use crate::app::TabId;
+    use crate::collect::ProcTick;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn ts(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    fn snap_with_top(t: SystemTime, name: &str) -> Snapshot {
+        Snapshot {
+            t,
+            procs: vec![ProcTick {
+                name: name.to_string(),
+                cpu_pct: 50.0,
+                ..ProcTick::default()
+            }],
+            ..Snapshot::default()
+        }
+    }
+
+    fn insight(sev: Severity, title: &str) -> Insight {
+        Insight {
+            severity: sev,
+            title: title.to_string(),
+            body: Vec::new(),
+            suggested_tab: TabId::Overview,
+        }
+    }
+
+    #[test]
+    fn derive_events_empty_session_returns_empty() {
+        // Even with insights present, an empty session blocks event
+        // generation — we need at least 2 ticks to derive top-proc churn,
+        // and surfacing insights without that context is too noisy.
+        let insights = vec![insight(Severity::Warn, "alone")];
+        assert!(derive_events(&[], &insights).is_empty());
+    }
+
+    #[test]
+    fn derive_events_single_snapshot_returns_empty() {
+        let session = vec![snap_with_top(ts(100), "foo")];
+        assert!(derive_events(&session, &[]).is_empty());
+    }
+
+    #[test]
+    fn derive_events_stable_top_proc_emits_no_proc_events() {
+        let session = vec![
+            snap_with_top(ts(100), "foo"),
+            snap_with_top(ts(101), "foo"),
+            snap_with_top(ts(102), "foo"),
+        ];
+        assert!(derive_events(&session, &[]).is_empty());
+    }
+
+    #[test]
+    fn derive_events_one_event_per_top_proc_change() {
+        // 3 transitions across 4 ticks → 3 events.
+        let session = vec![
+            snap_with_top(ts(100), "a"),
+            snap_with_top(ts(101), "b"),
+            snap_with_top(ts(102), "c"),
+            snap_with_top(ts(103), "d"),
+        ];
+        let events = derive_events(&session, &[]);
+        assert_eq!(events.len(), 3);
+        // All carry the "A → B" arrow detail.
+        for e in &events {
+            assert!(e.detail.contains("→"), "missing arrow: {}", e.detail);
+        }
+    }
+
+    #[test]
+    fn derive_events_filters_info_severity_insights() {
+        let session = vec![
+            snap_with_top(ts(100), "foo"),
+            snap_with_top(ts(101), "foo"),
+        ];
+        let insights = vec![insight(Severity::Info, "no anomalies")];
+        assert!(derive_events(&session, &insights).is_empty());
+    }
+
+    #[test]
+    fn derive_events_emits_warn_and_crit_insights() {
+        let session = vec![
+            snap_with_top(ts(100), "foo"),
+            snap_with_top(ts(101), "foo"),
+        ];
+        let insights = vec![
+            insight(Severity::Warn, "swap thrash"),
+            insight(Severity::Crit, "vram pinned"),
+        ];
+        let events = derive_events(&session, &insights);
+        assert_eq!(events.len(), 2);
+        let details: Vec<&str> = events.iter().map(|e| e.detail.as_str()).collect();
+        assert!(details.iter().any(|d| d.contains("[WARN]") && d.contains("swap thrash")));
+        assert!(details.iter().any(|d| d.contains("[CRIT]") && d.contains("vram pinned")));
+    }
+
+    #[test]
+    fn derive_events_sorted_by_age_ascending() {
+        // Newest-first means smaller age_secs first. The function sorts
+        // before returning — verify the invariant holds for a session
+        // with multiple churn events spread across distinct timestamps.
+        let session = vec![
+            snap_with_top(ts(100), "a"),
+            snap_with_top(ts(110), "b"),
+            snap_with_top(ts(120), "c"),
+            snap_with_top(ts(130), "d"),
+        ];
+        let events = derive_events(&session, &[]);
+        for pair in events.windows(2) {
+            assert!(
+                pair[0].age_secs <= pair[1].age_secs,
+                "ordering broken: {} then {}",
+                pair[0].age_secs,
+                pair[1].age_secs
+            );
+        }
+    }
+
+    #[test]
+    fn derive_events_does_not_panic_on_timestamps_running_backwards() {
+        // Real clocks can jump backwards (NTP corrections, manual resets).
+        // duration_since returns Err in that case; the function's `.unwrap_or(0)`
+        // must keep it from panicking.
+        let session = vec![
+            snap_with_top(ts(200), "foo"),
+            snap_with_top(ts(100), "bar"),
+        ];
+        let events = derive_events(&session, &[]);
+        // Just confirm we got back a valid Vec; specific values aren't
+        // load-bearing once duration_since errored.
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn derive_events_handles_snapshots_with_no_procs() {
+        // A snapshot with no procs has no top — the prev_top stays None
+        // and we emit nothing. Must not panic on the iterator chain.
+        let session = vec![Snapshot::default(), Snapshot::default()];
+        assert!(derive_events(&session, &[]).is_empty());
+    }
+
+    #[test]
+    fn derive_events_change_detected_only_on_distinct_neighbors() {
+        // a → b → a → b should yield 3 changes (one per transition).
+        let session = vec![
+            snap_with_top(ts(100), "a"),
+            snap_with_top(ts(101), "b"),
+            snap_with_top(ts(102), "a"),
+            snap_with_top(ts(103), "b"),
+        ];
+        let events = derive_events(&session, &[]);
+        assert_eq!(events.len(), 3);
+    }
 }

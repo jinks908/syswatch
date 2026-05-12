@@ -329,3 +329,47 @@ fn kpi_color(v: f32, warn: f32, crit: f32) -> ratatui::style::Color {
 fn max_or(xs: &[f64], min: f64) -> f64 {
     xs.iter().cloned().fold(min, f64::max)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kpi_color_thresholds() {
+        assert_eq!(kpi_color(0.0, 70.0, 90.0), p::status_good());
+        assert_eq!(kpi_color(69.9, 70.0, 90.0), p::status_good());
+        assert_eq!(kpi_color(70.0, 70.0, 90.0), p::status_warn());
+        assert_eq!(kpi_color(89.9, 70.0, 90.0), p::status_warn());
+        assert_eq!(kpi_color(90.0, 70.0, 90.0), p::status_error());
+        assert_eq!(kpi_color(100.0, 70.0, 90.0), p::status_error());
+    }
+
+    #[test]
+    fn kpi_color_crit_branch_runs_first() {
+        // If a caller swaps warn/crit, crit still wins because the
+        // branch order locks it in. Documents the contract.
+        assert_eq!(kpi_color(95.0, 100.0, 90.0), p::status_error());
+    }
+
+    #[test]
+    fn max_or_empty_slice_returns_min() {
+        assert_eq!(max_or(&[], 5.0), 5.0);
+    }
+
+    #[test]
+    fn max_or_picks_largest_above_min() {
+        assert_eq!(max_or(&[1.0, 4.0, 2.0], 0.0), 4.0);
+    }
+
+    #[test]
+    fn max_or_returns_min_when_all_values_lower() {
+        // `min` acts as a floor — used to keep graph axes non-zero even
+        // when no samples are big enough yet.
+        assert_eq!(max_or(&[1.0, 2.0, 3.0], 100.0), 100.0);
+    }
+
+    #[test]
+    fn max_or_single_element() {
+        assert_eq!(max_or(&[42.0], 0.0), 42.0);
+    }
+}
