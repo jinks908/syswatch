@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <em>Sibling to <a href="https://github.com/matthart1983/netwatch">NetWatch</a>. Same chrome. Same palette. Twelve tabs covering everything that runs on one box.</em>
+  <em>Sibling to <a href="https://github.com/matthart1983/netwatch">NetWatch</a> (network) and <a href="https://github.com/matthart1983/diskwatch">DiskWatch</a> (disk). Same chrome. Same palette. Twelve tabs covering everything that runs on one box.</em>
 </p>
 
 <p align="center">
