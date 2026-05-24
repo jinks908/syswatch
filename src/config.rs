@@ -16,6 +16,14 @@ pub struct SyswatchConfig {
     pub theme: String,
     /// Active graph style — `"bars"` or `"dots"`.
     pub graph_style: String,
+    /// btop-style fade + faint grid effect. When `true`, every chart in the
+    /// app renders columns with a right-bright / left-dim color gradient
+    /// (newest at full intensity, oldest at ~30%), with a faint dot grid
+    /// behind charts at least 16×4 cells. Top-N tables (procs, services,
+    /// memory, net) fade row-by-row top-bright / bottom-dim. Off by
+    /// default; original solid look is unchanged.
+    #[serde(default)]
+    pub graph_fade: bool,
     /// Tab the app opens on. Lowercase tab name, e.g. `"overview"` / `"cpu"`.
     pub default_tab: String,
     /// Sample interval in milliseconds. Clamped to `[100, 5000]` on load.
@@ -27,6 +35,7 @@ impl Default for SyswatchConfig {
         Self {
             theme: "dark".into(),
             graph_style: "bars".into(),
+            graph_fade: false,
             default_tab: "overview".into(),
             tick_ms: 1000,
         }
@@ -112,6 +121,7 @@ mod tests {
         let mut c = SyswatchConfig {
             theme: "".into(),
             graph_style: "".into(),
+            graph_fade: false,
             default_tab: "".into(),
             tick_ms: 1000,
         };
@@ -126,6 +136,7 @@ mod tests {
         let mut c = SyswatchConfig {
             theme: "dracula".into(),
             graph_style: "dots".into(),
+            graph_fade: true,
             default_tab: "cpu".into(),
             tick_ms: 500,
         };
@@ -143,6 +154,7 @@ mod tests {
         let original = SyswatchConfig {
             theme: "nord".into(),
             graph_style: "dots".into(),
+            graph_fade: true,
             default_tab: "memory".into(),
             tick_ms: 750,
         };

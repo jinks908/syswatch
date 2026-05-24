@@ -136,7 +136,14 @@ fn draw_throughput(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(inner);
 
-    graph::render(f, cols[0], &normalized, app.graph_style, p::brand());
+    graph::render(
+        f,
+        cols[0],
+        &normalized,
+        app.graph_style,
+        p::brand(),
+        app.graph_opts(),
+    );
 
     let counters = vec![
         Line::from(vec![

@@ -203,9 +203,15 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
     let end = (start + take).min(procs.len());
 
     let mut lines = vec![header];
+    let rendered_rows = procs[start..end].iter().count();
     for (i, proc_) in procs[start..end].iter().enumerate() {
         let abs = start + i;
         let selected = abs == sel_clamped;
+        let row_alpha = if app.user_config.graph_fade && !selected {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
         let row_bg = if selected { p::selection_bg() } else { p::bg() };
         let dot_color = if proc_.cpu_pct >= 30.0 {
             p::status_warn()
@@ -336,6 +342,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
             Style::default().bg(row_bg),
         ));
         let _ = dot_color;
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
         lines.push(Line::from(spans));
     }
 

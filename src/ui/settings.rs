@@ -28,17 +28,18 @@ pub const TAB_NAMES: &[&str] = &[
 pub mod cursor {
     pub const THEME: usize = 0;
     pub const GRAPH_STYLE: usize = 1;
-    pub const DEFAULT_TAB: usize = 2;
-    pub const TICK_MS: usize = 3;
+    pub const GRAPH_FADE: usize = 2;
+    pub const DEFAULT_TAB: usize = 3;
+    pub const TICK_MS: usize = 4;
 }
 
-pub const ROWS: usize = 4;
+pub const ROWS: usize = 5;
 
 /// Whether the row at `idx` is enum-cycled (←→) vs free-text (Enter).
 fn is_enum_row(idx: usize) -> bool {
     matches!(
         idx,
-        cursor::THEME | cursor::GRAPH_STYLE | cursor::DEFAULT_TAB
+        cursor::THEME | cursor::GRAPH_STYLE | cursor::GRAPH_FADE | cursor::DEFAULT_TAB
     )
 }
 
@@ -56,6 +57,10 @@ fn build_rows(cfg: &SyswatchConfig) -> Vec<Row> {
         Row {
             label: "Graph Style",
             value: cfg.graph_style.clone(),
+        },
+        Row {
+            label: "Graph Fade (btop)",
+            value: if cfg.graph_fade { "on" } else { "off" }.into(),
         },
         Row {
             label: "Default Tab",
@@ -205,6 +210,9 @@ pub fn cycle_next(cfg: &mut SyswatchConfig, cursor: usize) {
                 "bars".into()
             };
         }
+        c if c == cursor::GRAPH_FADE => {
+            cfg.graph_fade = !cfg.graph_fade;
+        }
         c if c == cursor::DEFAULT_TAB => {
             let i = TAB_NAMES
                 .iter()
@@ -227,6 +235,7 @@ pub fn cycle_prev(cfg: &mut SyswatchConfig, cursor: usize) {
             cfg.theme = theme::THEME_NAMES[prev].into();
         }
         c if c == cursor::GRAPH_STYLE => cycle_next(cfg, cursor), // 2-state, same direction
+        c if c == cursor::GRAPH_FADE => cycle_next(cfg, cursor),  // toggle
         c if c == cursor::DEFAULT_TAB => {
             let i = TAB_NAMES
                 .iter()

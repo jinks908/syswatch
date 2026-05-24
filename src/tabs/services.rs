@@ -114,10 +114,16 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, services: &[ServiceTick]) {
     let end = (start + take).min(services.len());
 
     let mut lines = vec![header];
+    let rendered_rows = services[start..end].iter().count();
     for (i, svc) in services[start..end].iter().enumerate() {
         let abs = start + i;
         let selected = abs == sel_clamped;
         let row_bg = if selected { p::selection_bg() } else { p::bg() };
+        let row_alpha = if app.user_config.graph_fade && !selected {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
         let (status_color, status_label) = status_style(svc.status);
         let pid_text = svc.pid.map(|p| p.to_string()).unwrap_or_else(|| "—".into());
         let exit_text = svc
@@ -129,7 +135,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, services: &[ServiceTick]) {
             Some(c) if c > 0 => p::status_error(),
             _ => p::text_muted(),
         };
-        lines.push(Line::from(vec![
+        let spans = vec![
             Span::styled(
                 format!(" {:<7} ", status_label),
                 Style::default()
@@ -153,7 +159,13 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, services: &[ServiceTick]) {
                 fill_remainder(inner.width as usize, &svc.name),
                 Style::default().bg(row_bg),
             ),
-        ]));
+        ];
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
+        lines.push(Line::from(spans));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::bg())),

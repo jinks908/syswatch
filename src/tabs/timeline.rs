@@ -10,7 +10,7 @@ use crate::app::{App, Snapshot};
 use crate::insights::{Insight, Severity};
 use crate::ui::{
     palette as p,
-    widgets::{panel, sparkline},
+    widgets::{panel, sparkline_styled},
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, _snap: &Snapshot) {
@@ -79,7 +79,7 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
             label.to_string(),
             Style::default().fg(p::text_muted()),
         )];
-        let line = sparkline(series, *color);
+        let line = sparkline_styled(series, *color, app.graph_style);
         spans.extend(line.spans);
         // Highlight the scrub cursor inside the strip if applicable.
         if app.scrub_offset > 0 {
@@ -146,7 +146,8 @@ fn draw_events(f: &mut Frame, area: Rect, app: &App) {
     ]);
     let mut lines = vec![header];
     let take = inner.height.saturating_sub(1) as usize;
-    for ev in events.iter().take(take) {
+    let rendered_rows = events.iter().take(take).count();
+    for (i, ev) in events.iter().take(take).enumerate() {
         let color = match ev.kind {
             EventKind::InsightStart => p::status_warn(),
             EventKind::InsightClear => p::status_good(),
@@ -157,7 +158,12 @@ fn draw_events(f: &mut Frame, area: Rect, app: &App) {
             EventKind::InsightClear => "OK  ",
             EventKind::TopProcChange => "PROC",
         };
-        lines.push(Line::from(vec![
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
+        let spans = vec![
             Span::styled(
                 format!("{:>7}s ", ev.age_secs),
                 Style::default().fg(p::text_muted()),
@@ -167,7 +173,13 @@ fn draw_events(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(ev.detail.clone(), Style::default().fg(p::text_primary())),
-        ]));
+        ];
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
+        lines.push(Line::from(spans));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::bg())),

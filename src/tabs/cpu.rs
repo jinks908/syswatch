@@ -43,7 +43,14 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         width: cols[0].width,
         height: cols[0].height.saturating_sub(2),
     };
-    graph::render(f, spark_area, &normalized, app.graph_style, p::brand());
+    graph::render(
+        f,
+        spark_area,
+        &normalized,
+        app.graph_style,
+        p::brand(),
+        app.graph_opts(),
+    );
 
     // Counters panel.
     let counters = vec![

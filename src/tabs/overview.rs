@@ -51,6 +51,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         &app.history.cpu.to_vec(),
         100.0,
         style,
+        app.graph_opts(),
     );
     let mem_pct = if snap.mem.total_bytes > 0 {
         100.0 * snap.mem.used_bytes as f32 / snap.mem.total_bytes as f32
@@ -71,6 +72,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             .collect::<Vec<f32>>(),
         100.0,
         style,
+        app.graph_opts(),
     );
     let swap_pct = if snap.mem.swap_total_bytes > 0 {
         100.0 * snap.mem.swap_used_bytes as f32 / snap.mem.swap_total_bytes as f32
@@ -86,6 +88,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         &[],
         100.0,
         style,
+        app.graph_opts(),
     );
     let io = snap.disk_io.read_rate + snap.disk_io.write_rate;
     kpi_tile(
@@ -102,6 +105,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             .collect::<Vec<f32>>(),
         max_or(&app.history.io_rate.to_vec(), 1.0) as f32,
         style,
+        app.graph_opts(),
     );
     let net: f64 = snap.net.iter().map(|i| i.rx_rate + i.tx_rate).sum();
     kpi_tile(
@@ -118,6 +122,7 @@ fn draw_kpi_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             .collect::<Vec<f32>>(),
         max_or(&app.history.net_rate.to_vec(), 1.0) as f32,
         style,
+        app.graph_opts(),
     );
 }
 
@@ -130,6 +135,7 @@ fn kpi_tile(
     series: &[f32],
     series_max: f32,
     style: GraphStyle,
+    opts: crate::ui::graph::GraphOpts,
 ) {
     let block = panel(label);
     let inner = block.inner(area);
@@ -168,7 +174,7 @@ fn kpi_tile(
 
     if !series.is_empty() && series_max > 0.0 {
         let normalized: Vec<f32> = series.iter().map(|v| (v / series_max).min(1.0)).collect();
-        graph::render(f, h[2], &normalized, style, accent);
+        graph::render(f, h[2], &normalized, style, accent, opts);
     }
 }
 
@@ -179,7 +185,7 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .split(area);
 
     draw_per_core(f, cols[0], snap, app.graph_style);
-    draw_top_procs(f, cols[1], snap);
+    draw_top_procs(f, cols[1], app, snap);
 }
 
 fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
@@ -208,7 +214,7 @@ fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) 
     );
 }
 
-fn draw_top_procs(f: &mut Frame, area: Rect, snap: &Snapshot) {
+fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let block = panel("Top processes (by CPU)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -226,20 +232,40 @@ fn draw_top_procs(f: &mut Frame, area: Rect, snap: &Snapshot) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows = snap
-        .procs
-        .iter()
-        .take(inner.height.saturating_sub(1) as usize)
-        .map(|p_| {
-            Row::new(vec![
-                Cell::from(p_.pid.to_string()),
-                Cell::from(p_.user.clone()),
-                Cell::from(format!("{:.1}", p_.cpu_pct))
-                    .style(Style::default().fg(kpi_color(p_.cpu_pct, 30.0, 70.0))),
-                Cell::from(human_bytes(p_.mem_rss)),
-                Cell::from(p_.name.clone()),
-            ])
-        });
+    // Cells without an explicit fg inherit the Table's base style. ratatui
+    // Cell::style overrides that, so for fade to actually affect every
+    // column we have to set an explicit fg on each cell (then fade it).
+    // Otherwise only the %CPU column (which carries a kpi_color fg) would
+    // dim and the rest of the row would stay full-bright, making the fade
+    // look broken.
+    let take = inner.height.saturating_sub(1) as usize;
+    let rendered_rows = snap.procs.iter().take(take).count();
+    let rows = snap.procs.iter().take(take).enumerate().map(|(i, p_)| {
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
+        let fade = |s: Style| {
+            if (row_alpha - 1.0).abs() < f32::EPSILON {
+                s
+            } else if let Some(fg) = s.fg {
+                s.fg(crate::ui::graph::fade_color(fg, p::bg(), row_alpha))
+            } else {
+                s
+            }
+        };
+        let plain_fg = fade(Style::default().fg(p::text_primary()));
+        let muted_fg = fade(Style::default().fg(p::text_muted()));
+        Row::new(vec![
+            Cell::from(p_.pid.to_string()).style(plain_fg),
+            Cell::from(p_.user.clone()).style(muted_fg),
+            Cell::from(format!("{:.1}", p_.cpu_pct))
+                .style(fade(Style::default().fg(kpi_color(p_.cpu_pct, 30.0, 70.0)))),
+            Cell::from(human_bytes(p_.mem_rss)).style(plain_fg),
+            Cell::from(p_.name.clone()).style(plain_fg),
+        ])
+    });
 
     let widths = [
         Constraint::Length(7),

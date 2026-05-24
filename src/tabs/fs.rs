@@ -71,10 +71,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let take = inner.height.saturating_sub(1) as usize;
-    for d in sorted.iter().take(take) {
+    let rendered_rows = sorted.iter().take(take).count();
+    for (i, d) in sorted.iter().take(take).enumerate() {
         let pct = (d.usage_pct / 100.0).clamp(0.0, 1.0);
         let color = bar_color(d.usage_pct);
         let bar = block_bar_styled(pct, bar_w, color, app.graph_style);
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
         let mut spans = vec![
             Span::styled(" \u{25cf} ", Style::default().fg(color)),
             Span::styled(
@@ -103,6 +109,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             ),
         ];
         spans.extend(bar.spans);
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
         lines.push(Line::from(spans));
     }
     f.render_widget(

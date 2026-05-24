@@ -26,7 +26,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 
     draw_battery(f, v[0], &snap.power, app.graph_style);
     draw_status(f, v[1], &snap.power);
-    draw_thermal(f, v[2], &snap.power, app.graph_style);
+    draw_thermal(f, v[2], &snap.power, app.graph_style, app.graph_opts());
 }
 
 fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick, style: GraphStyle) {
@@ -245,7 +245,13 @@ fn draw_status(f: &mut Frame, area: Rect, pwr: &PowerTick) {
     );
 }
 
-fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick, style: GraphStyle) {
+fn draw_thermal(
+    f: &mut Frame,
+    area: Rect,
+    pwr: &PowerTick,
+    style: GraphStyle,
+    opts: crate::ui::graph::GraphOpts,
+) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -275,7 +281,13 @@ fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick, style: GraphStyle) {
         );
     } else {
         let mut lines = Vec::new();
-        for z in pwr.thermal_zones.iter() {
+        let rendered_rows = pwr.thermal_zones.len();
+        for (i, z) in pwr.thermal_zones.iter().enumerate() {
+            let row_alpha = if opts.fade {
+                crate::ui::graph::row_fade_alpha(i, rendered_rows)
+            } else {
+                1.0
+            };
             let color = if z.temp_c >= 80.0 {
                 p::status_error()
             } else if z.temp_c >= 60.0 {
@@ -297,6 +309,11 @@ fn draw_thermal(f: &mut Frame, area: Rect, pwr: &PowerTick, style: GraphStyle) {
                 Span::styled(format!("{:>5.1}°C ", z.temp_c), Style::default().fg(color)),
             ];
             spans.extend(bar.spans);
+            let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+                spans
+            } else {
+                crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+            };
             lines.push(Line::from(spans));
         }
         f.render_widget(

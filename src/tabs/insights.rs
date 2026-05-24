@@ -97,6 +97,15 @@ fn draw_strip(f: &mut Frame, area: Rect, insights: &[Insight]) {
 }
 
 fn draw_cards(f: &mut Frame, area: Rect, insights: &[Insight]) {
+    // Paint the full cards area with the theme bg first. Each `draw_card`
+    // call only paints into its own 6-row box, so when there are fewer
+    // cards than fit (the common case — 0–2 insights vs. a 30-row tab),
+    // the area below the last card would otherwise show whatever ratatui
+    // cleared the buffer to (terminal default, typically black). With
+    // explicit-bg themes this rendered as a black band below the top
+    // card; this pre-fill keeps the rest of the tab on theme.
+    f.render_widget(Paragraph::new("").style(Style::default().bg(p::bg())), area);
+
     if insights.is_empty() {
         draw_all_clear(f, area);
         return;

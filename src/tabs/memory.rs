@@ -25,7 +25,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 
     draw_ram_bar(f, v[0], snap, app.graph_style);
     draw_swap(f, v[1], snap, app.graph_style);
-    draw_top_rss(f, v[2], snap);
+    draw_top_rss(f, v[2], app, snap);
 }
 
 fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
@@ -114,7 +114,7 @@ fn draw_swap(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
     );
 }
 
-fn draw_top_rss(f: &mut Frame, area: Rect, snap: &Snapshot) {
+fn draw_top_rss(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let block = panel("Top processes (by RSS)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -155,8 +155,14 @@ fn draw_top_rss(f: &mut Frame, area: Rect, snap: &Snapshot) {
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    for proc_ in sorted.iter().take(take) {
-        lines.push(Line::from(vec![
+    let rendered_rows = sorted.iter().take(take).count();
+    for (i, proc_) in sorted.iter().take(take).enumerate() {
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
+        let spans = vec![
             Span::styled(
                 format!("{:>7} ", proc_.pid),
                 Style::default().fg(p::text_primary()),
@@ -174,7 +180,13 @@ fn draw_top_rss(f: &mut Frame, area: Rect, snap: &Snapshot) {
                 Style::default().fg(p::text_muted()),
             ),
             Span::styled(proc_.name.clone(), Style::default().fg(p::text_primary())),
-        ]));
+        ];
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
+        lines.push(Line::from(spans));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::bg())),

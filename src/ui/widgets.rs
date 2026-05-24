@@ -82,21 +82,50 @@ pub fn block_bar_styled(
     Line::from(vec![Span::styled(s, Style::default().fg(color))])
 }
 
-/// Block sparkline glyphs `▁▂▃▄▅▆▇█` for the supplied normalized samples (0..=1).
-pub fn sparkline(samples: &[f32], color: ratatui::style::Color) -> Line<'static> {
-    const GLYPHS: [char; 8] = [
-        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
-        '\u{2588}',
-    ];
-    let s: String = samples
-        .iter()
-        .map(|v| {
-            let v = v.clamp(0.0, 1.0);
+/// Style-aware sparkline that produces a `Line` (so callers like the
+/// Timeline tab can composite a label + cursor marker around it).
+/// `GraphStyle::Bars` renders the original block glyphs; `GraphStyle::Dots`
+/// renders a 5-level braille fill from the bottom of the cell — the
+/// 1-cell-tall analogue of `graph::render_dots`. Used by Timeline strips
+/// so the `g` toggle that flips every multi-row chart also flips inline
+/// sparklines.
+pub fn sparkline_styled(
+    samples: &[f32],
+    color: ratatui::style::Color,
+    style: GraphStyle,
+) -> Line<'static> {
+    let s: String = samples.iter().map(|v| sparkline_glyph(*v, style)).collect();
+    Line::from(vec![Span::styled(s, Style::default().fg(color))])
+}
+
+fn sparkline_glyph(v: f32, style: GraphStyle) -> char {
+    let v = v.clamp(0.0, 1.0);
+    match style {
+        GraphStyle::Bars => {
+            const GLYPHS: [char; 8] = [
+                '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+                '\u{2588}',
+            ];
             let idx = ((v * 7.0).round() as usize).min(7);
             GLYPHS[idx]
-        })
-        .collect();
-    Line::from(vec![Span::styled(s, Style::default().fg(color))])
+        }
+        GraphStyle::Dots => {
+            // 5 levels of braille fill in a single cell. Each level adds
+            // the next pixel row from the bottom up across both
+            // sub-columns. Matches `graph::render_dots` visually at
+            // cell_h=1: the strip reads as a continuous filled area
+            // composed of stippled braille rather than solid blocks.
+            const DOT_LEVELS: [char; 5] = [
+                ' ',        // 0/4 — empty
+                '\u{28C0}', // 1/4 — bottom row (dots 7,8)
+                '\u{28E4}', // 2/4 — bottom + row above (dots 7,8,3,6)
+                '\u{28F6}', // 3/4 — three rows from bottom (dots 7,8,3,6,2,5)
+                '\u{28FF}', // 4/4 — full cell (all 8 dots)
+            ];
+            let level = (v * 4.0).round() as usize;
+            DOT_LEVELS[level.min(4)]
+        }
+    }
 }
 
 pub fn human_bytes(b: u64) -> String {

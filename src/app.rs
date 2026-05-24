@@ -339,6 +339,15 @@ pub struct App {
 }
 
 impl App {
+    /// Render-time graph options bundle. Built once per render path from
+    /// `user_config.graph_fade`; passed to every `graph::render` call site
+    /// so a single config toggle drives the entire UI.
+    pub fn graph_opts(&self) -> crate::ui::graph::GraphOpts {
+        crate::ui::graph::GraphOpts {
+            fade: self.user_config.graph_fade,
+        }
+    }
+
     pub fn displayed_snap(&self) -> Option<&Snapshot> {
         if self.scrub_offset > 0 {
             self.history.session.nth_back(self.scrub_offset)
@@ -689,6 +698,10 @@ impl App {
             "dots" => GraphStyle::Dots,
             _ => GraphStyle::Bars,
         };
+        // `graph_fade` deliberately has no cached runtime copy on `App` —
+        // `App::graph_opts()` reads it from `user_config` live each render
+        // tick, so the toggle takes effect on the very next frame without
+        // a sync step here. Don't add a redundant mirror; it'll drift.
     }
 }
 

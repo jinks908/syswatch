@@ -19,7 +19,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .split(area);
 
     draw_aggregate(f, v[0], app, snap);
-    draw_iface_table(f, v[1], snap);
+    draw_iface_table(f, v[1], app, snap);
 }
 
 fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -42,7 +42,14 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(inner);
 
-    graph::render(f, cols[0], &normalized, app.graph_style, p::brand());
+    graph::render(
+        f,
+        cols[0],
+        &normalized,
+        app.graph_style,
+        p::brand(),
+        app.graph_opts(),
+    );
 
     let total: f64 = snap.net.iter().map(|i| i.rx_rate + i.tx_rate).sum();
     let rx: f64 = snap.net.iter().map(|i| i.rx_rate).sum();
@@ -84,7 +91,7 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     );
 }
 
-fn draw_iface_table(f: &mut Frame, area: Rect, snap: &Snapshot) {
+fn draw_iface_table(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let block = panel("Interfaces (via netwatch-sdk)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -98,13 +105,19 @@ fn draw_iface_table(f: &mut Frame, area: Rect, snap: &Snapshot) {
         Span::styled(format!("{:>14}", "TX TOTAL"), header_style()),
     ])];
     let take = inner.height.saturating_sub(1) as usize;
-    for iface in snap.net.iter().take(take) {
+    let rendered_rows = snap.net.iter().take(take).count();
+    for (i, iface) in snap.net.iter().take(take).enumerate() {
         let state_color = if iface.is_up {
             p::status_good()
         } else {
             p::border()
         };
-        lines.push(Line::from(vec![
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
+        let spans = vec![
             Span::styled(
                 format!("{:<14.14} ", iface.name),
                 Style::default().fg(p::text_primary()),
@@ -129,7 +142,13 @@ fn draw_iface_table(f: &mut Frame, area: Rect, snap: &Snapshot) {
                 format!("{:>14}", human_bytes(iface.tx_bytes)),
                 Style::default().fg(p::text_muted()),
             ),
-        ]));
+        ];
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
+        lines.push(Line::from(spans));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::bg())),
