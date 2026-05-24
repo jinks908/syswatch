@@ -46,7 +46,14 @@ pub struct Collector {
 }
 
 impl Collector {
-    pub fn new() -> Self {
+    /// `tick_ms` is the UI sample rate from `SyswatchConfig`. On macOS
+    /// it threads through to the IOReport+SMC sampler worker so the
+    /// platform sample cadence matches the user's configured rate
+    /// (clamped to a 250 ms floor — IOReport sampling has overhead).
+    /// Other platforms ignore the value today.
+    pub fn new(tick_ms: u64) -> Self {
+        let _ = tick_ms; // suppress unused on non-macos
+
         let mut sys = System::new_with_specifics(RefreshKind::everything());
         sys.refresh_all();
         let disks = Disks::new_with_refreshed_list();
@@ -90,7 +97,7 @@ impl Collector {
             services: ServicesCollector::new(),
             host,
             #[cfg(target_os = "macos")]
-            macos: MacosSampler::try_init(),
+            macos: MacosSampler::try_init(tick_ms),
         }
     }
 

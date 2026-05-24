@@ -762,7 +762,7 @@ pub fn run(opts: Options) -> Result<()> {
     let mut collector: Option<Collector> = if app.replay_mode {
         None
     } else {
-        Some(Collector::new())
+        Some(Collector::new(app.user_config.tick_ms))
     };
 
     enable_raw_mode()?;

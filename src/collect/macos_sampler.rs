@@ -48,25 +48,30 @@ struct MacosSamplerWorker {
     prev_sample: Option<macpow::ioreport::Sample>,
 }
 
+/// Floor on the macOS sampler cadence. IOReport sampling has measurable
+/// overhead (the kernel walks every subscribed channel) and SMC reads
+/// hit the controller; sampling faster than this is wasted work and
+/// can starve the rest of the system. Users who configure `tick_ms`
+/// below this floor still get UI updates at their requested rate —
+/// the macOS-specific fields just refresh at the floor.
+const MACOS_SAMPLE_FLOOR: Duration = Duration::from_millis(250);
+
 impl MacosSampler {
     /// Start the macOS sampler worker. Any failure to spawn the worker
     /// returns None; initialization failures inside the worker simply leave
     /// callers without a completed tick, which preserves UI responsiveness.
-    pub fn try_init() -> Option<Self> {
+    ///
+    /// `tick_ms` is the configured UI sample rate (from `SyswatchConfig`)
+    /// — the worker matches that cadence, clamped to `MACOS_SAMPLE_FLOOR`.
+    /// Changing `tick_ms` at runtime via the Settings popup currently
+    /// requires a restart for the sampler to pick up the new value;
+    /// the UI tick rate flips immediately regardless.
+    pub fn try_init(tick_ms: u64) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
+        let interval = Duration::from_millis(tick_ms).max(MACOS_SAMPLE_FLOOR);
         std::thread::Builder::new()
             .name("syswatch-macos-sampler".into())
-            .spawn(move || {
-                let Some(mut worker) = MacosSamplerWorker::try_init() else {
-                    return;
-                };
-                loop {
-                    if tx.send(worker.sample_tick()).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            })
+            .spawn(move || run_sampler_loop(tx, interval))
             .ok()?;
         Some(Self { rx, latest: None })
     }
@@ -79,6 +84,67 @@ impl MacosSampler {
             self.latest = Some(tick);
         }
         self.latest.clone()
+    }
+}
+
+/// Initial backoff after a worker panic. Doubles on each subsequent
+/// panic up to `BACKOFF_MAX`, then plateaus. Resets to this value
+/// after a successful tick.
+const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Long-running sampler loop with panic recovery.
+///
+/// `macpow`'s IOReport / SMC paths drop into OS frameworks that have
+/// historically broken on macOS upgrades — without this wrapper, a
+/// single panic in `sample_tick` would kill the worker thread and
+/// the GPU / power / fan fields would silently show `None` forever.
+/// We catch panics, log to stderr with the thread name so users have
+/// something to grep, and re-init with exponential backoff so a
+/// transient framework wobble doesn't blank platform metrics for
+/// the rest of the session.
+fn run_sampler_loop(tx: mpsc::Sender<MacosTick>, interval: Duration) {
+    let mut backoff = BACKOFF_INITIAL;
+    loop {
+        let tx = tx.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Some(mut worker) = MacosSamplerWorker::try_init() else {
+                return Err("MacosSamplerWorker::try_init returned None".to_string());
+            };
+            loop {
+                if tx.send(worker.sample_tick()).is_err() {
+                    return Ok(());
+                }
+                std::thread::sleep(interval);
+            }
+        }));
+        match result {
+            // Channel disconnected — caller dropped, exit cleanly.
+            Ok(Ok(())) => return,
+            // Init failure — backoff and retry; usually means SMC /
+            // IOReport handles aren't available right now.
+            Ok(Err(_msg)) => {}
+            // Panic caught — log + backoff + retry.
+            Err(payload) => {
+                let msg = panic_message(&payload);
+                eprintln!(
+                    "syswatch-macos-sampler: worker panicked ({msg}); restarting in {:?}",
+                    backoff
+                );
+            }
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 

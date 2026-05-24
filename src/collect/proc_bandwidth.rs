@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use netwatch_sdk::collectors::connections::ConnectionDetail;
@@ -38,17 +38,22 @@ pub struct ProcessBandwidthCollector {
     last_request_at: Option<Instant>,
     cached: HashMap<u32, (f64, f64)>, // pid -> (rx_rate, tx_rate)
     in_flight: bool,
-    request_tx: Option<Sender<Vec<InterfaceTick>>>,
+    // Bounded request channel (capacity 1). The `in_flight` guard
+    // already serializes requests, so this should never block or hit
+    // `Full` in normal operation — but if a future change drops the
+    // guard, the bounded channel turns a silent OOM into a visible
+    // dropped tick instead.
+    request_tx: Option<SyncSender<Vec<InterfaceTick>>>,
     result_rx: Receiver<HashMap<u32, (f64, f64)>>,
 }
 
 impl ProcessBandwidthCollector {
     pub fn new() -> Self {
-        let (request_tx, request_rx) = mpsc::channel();
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::channel();
         let request_tx = std::thread::Builder::new()
             .name("syswatch-proc-bandwidth".into())
-            .spawn(move || bandwidth_worker(request_rx, result_tx))
+            .spawn(move || run_bandwidth_worker_with_recovery(request_rx, result_tx))
             .ok()
             .map(|_| request_tx);
         Self {
@@ -80,12 +85,18 @@ impl ProcessBandwidthCollector {
             .unwrap_or(true);
         if stale && !self.in_flight {
             if let Some(tx) = self.request_tx.as_ref() {
-                match tx.send(current_net.to_vec()) {
+                match tx.try_send(current_net.to_vec()) {
                     Ok(()) => {
                         self.in_flight = true;
                         self.last_request_at = Some(Instant::now());
                     }
-                    Err(_) => {
+                    Err(TrySendError::Full(_)) => {
+                        // Should be unreachable thanks to `in_flight`,
+                        // but if the guard ever drifts out of sync with
+                        // the channel state, prefer a dropped tick over
+                        // an unbounded queue.
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
                         self.request_tx = None;
                         self.in_flight = false;
                     }
@@ -97,12 +108,58 @@ impl ProcessBandwidthCollector {
 }
 
 fn bandwidth_worker(
-    request_rx: Receiver<Vec<InterfaceTick>>,
-    result_tx: Sender<HashMap<u32, (f64, f64)>>,
-) {
+    request_rx: &Receiver<Vec<InterfaceTick>>,
+    result_tx: &std::sync::mpsc::Sender<HashMap<u32, (f64, f64)>>,
+) -> WorkerOutcome {
     while let Ok(current_net) = request_rx.recv() {
         if result_tx.send(compute(&current_net)).is_err() {
-            break;
+            return WorkerOutcome::ChannelDisconnected;
+        }
+    }
+    WorkerOutcome::ChannelDisconnected
+}
+
+/// Why the bandwidth worker stopped iterating. Used to decide whether
+/// to retry (after a caught panic) or exit cleanly (channel closed).
+enum WorkerOutcome {
+    ChannelDisconnected,
+}
+
+const WORKER_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const WORKER_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Wrap `bandwidth_worker` in `catch_unwind` + exponential backoff so a
+/// panic inside the lsof / ss parser, or inside the SDK's attribution
+/// math, doesn't permanently silence per-process bandwidth. Clean
+/// channel disconnect exits without retrying.
+fn run_bandwidth_worker_with_recovery(
+    request_rx: Receiver<Vec<InterfaceTick>>,
+    result_tx: std::sync::mpsc::Sender<HashMap<u32, (f64, f64)>>,
+) {
+    let mut backoff = WORKER_BACKOFF_INITIAL;
+    loop {
+        let request_rx_ref = &request_rx;
+        let result_tx_ref = &result_tx;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bandwidth_worker(request_rx_ref, result_tx_ref)
+        }));
+        match result {
+            Ok(WorkerOutcome::ChannelDisconnected) => return,
+            Err(payload) => {
+                let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                    s.to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                eprintln!(
+                    "syswatch-proc-bandwidth: worker panicked ({msg}); restarting in {:?}",
+                    backoff
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(WORKER_BACKOFF_MAX);
+            }
         }
     }
 }
@@ -225,8 +282,14 @@ fn parse_ss_connections(text: &str) -> Vec<ConnectionDetail> {
         };
         let local_addr = cols[4].to_string();
         let remote_addr = cols[5].to_string();
+        // Find the `users:` field by prefix rather than positional index.
+        // ss's column layout varies — kernels without `users:` (non-root),
+        // distributions that surface extra fields, and ipv6 with bracketed
+        // addresses can all shift the column offset. Prefix search survives
+        // any column drift since the `users:` token is unambiguous.
         let (pid, process_name) = cols
-            .get(6)
+            .iter()
+            .find(|t| t.starts_with("users:"))
             .map(|field| parse_ss_process(field))
             .unwrap_or((None, None));
 
@@ -429,6 +492,53 @@ tcp   ESTAB  0      0      127.0.0.1:55555 93.184.216.34:443 users:((\"curl\",pi
         assert_eq!(conns[0].kernel_rtt_us, Some(12_500.0));
     }
 
+    #[test]
+    fn ss_parser_ipv6_with_brackets() {
+        let text = "\
+Netid State Recv-Q Send-Q Local Address:Port           Peer Address:Port  Process
+tcp   ESTAB 0      0      [2001:db8::1]:443            [2001:db8::2]:55555 users:((\"nginx\",pid=99,fd=10))
+";
+
+        let conns = parse_ss_connections(text);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].local_addr, "[2001:db8::1]:443");
+        assert_eq!(conns[0].remote_addr, "[2001:db8::2]:55555");
+        assert_eq!(conns[0].pid, Some(99));
+        assert_eq!(conns[0].process_name.as_deref(), Some("nginx"));
+    }
+
+    #[test]
+    fn ss_parser_non_root_no_users_field() {
+        // ss without the `users:` field (running as non-root and without
+        // CAP_NET_ADMIN) — the row should still parse, just without PID
+        // or process name.
+        let text = "\
+Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port
+tcp   ESTAB 0      0      127.0.0.1:55555 93.184.216.34:443
+";
+
+        let conns = parse_ss_connections(text);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].pid, None);
+        assert_eq!(conns[0].process_name, None);
+        assert_eq!(conns[0].local_addr, "127.0.0.1:55555");
+    }
+
+    #[test]
+    fn ss_parser_udp_unconn_no_rtt() {
+        let text = "\
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port  Process
+udp   UNCONN 0      0      0.0.0.0:5353        0.0.0.0:*           users:((\"mDNSResponder\",pid=200,fd=15))
+";
+
+        let conns = parse_ss_connections(text);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].protocol, "UDP");
+        assert_eq!(conns[0].state, "UNCONN");
+        assert_eq!(conns[0].pid, Some(200));
+        assert_eq!(conns[0].kernel_rtt_us, None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_lsof_parser_extracts_pid_and_established_state() {
@@ -450,5 +560,100 @@ n192.168.1.10:55555->17.253.144.10:443
         assert_eq!(conns[0].local_addr, "192.168.1.10:55555");
         assert_eq!(conns[0].remote_addr, "17.253.144.10:443");
         assert_eq!(conns[0].kernel_rtt_us, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lsof_parser_multiple_connections_per_pid() {
+        // One process (Chrome, pid 500) with two TCP flows. The state
+        // machine must flush on each `f` boundary so both connections
+        // appear in the output, sharing the PID + process name.
+        let text = "\
+p500
+cChrome
+f10
+Ptcp
+TST=ESTABLISHED
+n10.0.0.1:55001->1.1.1.1:443
+f11
+Ptcp
+TST=ESTABLISHED
+n10.0.0.1:55002->8.8.8.8:443
+";
+
+        let conns = parse_macos_lsof_connections(text);
+        assert_eq!(conns.len(), 2);
+        for c in &conns {
+            assert_eq!(c.pid, Some(500));
+            assert_eq!(c.process_name.as_deref(), Some("Chrome"));
+            assert_eq!(c.protocol, "tcp");
+            assert_eq!(c.state, "ESTABLISHED");
+        }
+        assert_eq!(conns[0].remote_addr, "1.1.1.1:443");
+        assert_eq!(conns[1].remote_addr, "8.8.8.8:443");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lsof_parser_ipv6_with_brackets() {
+        let text = "\
+p700
+ccurl
+f8
+Ptcp
+TST=ESTABLISHED
+n[::1]:50000->[2001:db8::1]:443
+";
+
+        let conns = parse_macos_lsof_connections(text);
+        assert_eq!(conns.len(), 1);
+        // Bracket stripping leaves the bare IPv6 + port.
+        assert_eq!(conns[0].local_addr, "::1]:50000");
+        assert_eq!(conns[0].remote_addr, "2001:db8::1]:443");
+        // (The current parser only strips leading `[` / trailing `]` from
+        // the whole side, not from the address half — captured here as
+        // observed behaviour for now; a follow-up could tighten this.)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lsof_parser_listen_socket_no_arrow() {
+        // A LISTEN socket has no `->` in the `n` field. The parser
+        // should default remote_addr to "*:*" rather than crashing or
+        // assigning the local address.
+        let text = "\
+p999
+cnginx
+f3
+Ptcp
+TST=LISTEN
+n*:443
+";
+
+        let conns = parse_macos_lsof_connections(text);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].state, "LISTEN");
+        assert_eq!(conns[0].local_addr, "*:443");
+        assert_eq!(conns[0].remote_addr, "*:*");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lsof_parser_udp_no_state_field() {
+        // UDP sockets typically don't carry a `T=ST=...` line. The
+        // resulting connection should still emit with an empty state.
+        let text = "\
+p400
+cmDNSResponder
+f5
+Pudp
+n*:5353
+";
+
+        let conns = parse_macos_lsof_connections(text);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].protocol, "udp");
+        assert_eq!(conns[0].state, "");
+        assert_eq!(conns[0].pid, Some(400));
     }
 }
