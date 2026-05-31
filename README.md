@@ -6,7 +6,7 @@
   <p align="center">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/status-v0.1-yellow" alt="Status">
+    <img src="https://img.shields.io/badge/version-v0.7.0-green" alt="Version">
   </p>
 </p>
 
@@ -15,7 +15,11 @@
 </p>
 
 <p align="center">
-  <img src="demo.gif" alt="SysWatch — Overview, CPU, Memory, Procs, Power, Services, Timeline, Insights" width="800">
+  <img src="demo.gif" alt="SysWatch — Overview, CPU, Memory, GPU, Procs, Power, Timeline, Insights" width="800">
+</p>
+
+<p align="center">
+  <strong>New in v0.7.0:</strong> the GPU tab — per-device utilization &amp; VRAM as ~120s time-series, with the renderer/tiler engine split on Apple Silicon, temp and power. No sudo.
 </p>
 
 ---
@@ -49,14 +53,13 @@ cargo build --release
 
 **Prerequisites:** Rust 1.75+. No system dependencies on Linux. macOS links against the system frameworks.
 
-> Crates.io / Homebrew / pre-built binaries land with v0.1 release.
-
 ## Usage
 
 ```bash
 syswatch                       # default 1Hz tick
 syswatch --tick 500            # 2Hz
 syswatch --tab procs           # boot straight into a tab
+syswatch --replay session.swr  # scrub a recorded session
 ```
 
 ### Keys
@@ -67,9 +70,15 @@ syswatch --tab procs           # boot straight into a tab
 Tab / Shift-Tab     →  Cycle tabs
 ↑ / ↓               →  Select row (Procs, Services)
 s                   →  Cycle sort (Procs, Services)
+/                   →  Filter processes
 ← / →               →  Scrub session backward / forward
 Home / End          →  Oldest sample / live
 p                   →  Pause
+g                   →  Graph style (bars / dots)
+t                   →  Cycle theme
+,                   →  Settings (tick, theme, btop-style fade)
+S / R               →  Snapshot to disk / record session
+?                   →  Help
 q / Ctrl-C          →  Quit
 ```
 
@@ -77,7 +86,7 @@ q / Ctrl-C          →  Quit
 
 **Insights tab.** Heuristic anomaly detection over the rolling session — swap thrash, runaway processes, disk full, memory pressure, high load, zombie parties — surfaced as plain-English cards with a suggested tab. The Overview's bottom strip and the tab bar's `[+]` badge keep them in sight from anywhere.
 
-**Session-wide scrubbing.** The Timeline tab's `←/→` rewinds the entire app — every panel transparently shows historical state. The session ring is the foundation Snapshot/Diff and Recording will sit on (v0.2).
+**Session-wide scrubbing.** The Timeline tab's `←/→` rewinds the entire app — every panel transparently shows historical state. `R` records a session to a `.swr` file; `--replay` scrubs it back later. `S` dumps the current snapshot to disk.
 
 **Honest about platform limits.** Where data needs sudo (`powermetrics` for fans, per-component power, GPU util on Apple Silicon) the tab shows what we *can* get for free and a one-line note about what's gated. Nothing is faked, nothing prompts.
 
@@ -89,15 +98,13 @@ q / Ctrl-C          →  Quit
 - **Not a logging product.** We surface OOM kills as a *signal* in Memory; we are not a log search UI.
 - **Not pretty charts for screenshots.** Block sparklines, real numbers, no smooth curves, no themes-of-the-week.
 
-## v0.1 scope
+## Scope
 
-All twelve tabs render real data on macOS and Linux. Cross-platform collection via `sysinfo`. Net interface counters and aggregate disk IO route through [`netwatch-sdk`](https://github.com/matthart1983/netwatch-sdk) so SysWatch and the NetWatch agent share a single source of truth for those parsers.
+All twelve tabs render real data on macOS and Linux. Cross-platform collection via `sysinfo`; aggregate disk IO routes through [`netwatch-sdk`](https://github.com/matthart1983/netwatch-sdk) so SysWatch and the NetWatch agent share a single source of truth. Recording/Replay (`R` / `--replay`), Settings (`,`), Help (`?`), process filter (`/`), themes (`t`), and the btop-style fade rendering are all live.
 
-**Deferred to v0.2** — Snapshot+Diff (footer S/D), Profiles (P), Recording/Replay (R), Settings (`,`), Help (`?`), filter (`/`).
+**No sudo, ever.** GPU utilization, VRAM, and the renderer/tiler split on Apple Silicon come from `ioreg` (`AGXAccelerator PerformanceStatistics`); GPU temperature, per-rail power, and fans come from IOReport + SMC. Linux reads sysfs (`/sys/class/drm`, thermal zones, hwmon). Where a figure genuinely needs elevated access, the tab says so rather than prompting.
 
-**Deferred behind sudo** — fans, per-component power, GPU temperature + per-rail power (all need `powermetrics`); macOS thermal zone temps (need IOReport private FFI). GPU **utilization** and used memory on Apple Silicon are no-sudo via ioreg's `AGXAccelerator PerformanceStatistics`. Linux gets thermal zones for free via sysfs.
-
-**Deferred behind features** — NVIDIA live GPU stats (`gpu-nvidia` cargo feature, `nvml-wrapper`), SMART disk health (`smart` cargo feature, `smartctl --json`).
+**Behind cargo features** — NVIDIA live GPU stats (`gpu-nvidia`, `nvml-wrapper`).
 
 ## Architecture
 
@@ -106,8 +113,9 @@ src/
 ├── main.rs              CLI + entry
 ├── app.rs               Event loop, tab state, scrub plumbing
 ├── collect/             One Collector per subsystem; Snapshot the wire format
-│   ├── collector.rs     sysinfo-backed CPU/Mem/Procs + dispatch
-│   ├── gpu.rs           system_profiler / sysfs DRM
+│   ├── collector.rs     sysinfo-backed CPU/Mem/Procs/Net + dispatch
+│   ├── gpu.rs           ioreg AGXAccelerator / sysfs DRM / nvml
+│   ├── macos_sampler.rs Shared IOReport + SMC worker (GPU/power/fans)
 │   ├── power.rs         ioreg / pmset / sysfs power_supply
 │   ├── services.rs      launchctl / systemctl
 │   └── ring.rs          Bounded history + nth_back for scrubbing
@@ -119,7 +127,7 @@ src/
     └── widgets.rs       block_bar, sparkline, panel
 ```
 
-Refresh model: 1 Hz fast loop for CPU/Mem/Procs/Net/IO; slow loops at 5 s for Power/Services (subprocess-heavy on macOS). The UI redraws on tick or keypress; CPU budget target is < 0.5% at idle.
+Refresh model: a 1 Hz fast loop reads CPU/Mem/Net/IO in-process every tick; the heavier collectors run on their own budgets — processes every ~1.5 s, Power/Services every 5 s, per-process bandwidth on a background thread — so the loop stays cheap regardless of tick rate. The UI redraws on tick or keypress.
 
 ## License
 

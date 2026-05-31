@@ -128,7 +128,16 @@ impl History {
                     .push(u);
             }
             // VRAM used fraction, same only-when-reported rule as util.
-            if let (Some(total), Some(used)) = (g.vram_total_bytes, g.vram_used_bytes) {
+            // Discrete GPUs report a dedicated VRAM total; Apple Silicon
+            // (unified memory) does not, so fall back to total system RAM —
+            // the real ceiling the GPU allocates against. Without this the
+            // VRAM history stays empty on every Apple Silicon Mac even though
+            // `vram_used_bytes` is reported every tick.
+            if let Some(used) = g.vram_used_bytes {
+                let total = g
+                    .vram_total_bytes
+                    .filter(|t| *t > 0)
+                    .unwrap_or(snap.mem.total_bytes);
                 if total > 0 {
                     self.gpu_vram_by_name
                         .entry(g.name.clone())
@@ -1064,6 +1073,32 @@ mod tests {
         });
         assert_eq!(
             h.gpu_vram_by_name.get("gpu0").map(|r| r.to_vec()),
+            Some(vec![0.25])
+        );
+    }
+
+    #[test]
+    fn gpu_vram_falls_back_to_system_memory_total() {
+        use crate::collect::{GpuTick, MemTick};
+        let mut h = History::new(10);
+        // Apple Silicon shape: no dedicated VRAM total, but used is reported,
+        // and the snapshot carries total system RAM. The fraction is
+        // recorded against system RAM so the history isn't perpetually empty.
+        h.push(&Snapshot {
+            mem: MemTick {
+                total_bytes: 32 * 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+            gpus: vec![GpuTick {
+                name: "Apple M3 Pro".into(),
+                vram_total_bytes: None,
+                vram_used_bytes: Some(8 * 1024 * 1024 * 1024),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            h.gpu_vram_by_name.get("Apple M3 Pro").map(|r| r.to_vec()),
             Some(vec![0.25])
         );
     }
