@@ -47,6 +47,19 @@ pub struct History {
     /// tick — captures the "any GPU is busy" signal regardless of which one.
     /// 0 when no GPU exposes live util (Linux NVIDIA without nvml, etc.).
     pub gpu_util: Ring<f32>,
+    /// Per-device GPU util % (0..100) keyed by device name, one sample per
+    /// tick. Parallel to `gpu_util` (the cross-device max) but preserves each
+    /// device's own line so the GPU tab can draw a sparkline per card. Series
+    /// are created lazily as devices appear and only get a sample on ticks
+    /// where the device reports `util_pct` — a device that never exposes live
+    /// util keeps no series, so the tab shows its honest "no live util" state
+    /// instead of a fake flat-zero graph.
+    pub gpu_util_by_name: HashMap<String, Ring<f32>>,
+    /// Per-device VRAM used fraction (0..1) keyed by device name. Same lazy,
+    /// only-when-reported discipline as `gpu_util_by_name`: a sample lands
+    /// only on ticks where the device reports both a total and a used figure,
+    /// so devices that don't expose VRAM usage keep no series.
+    pub gpu_vram_by_name: HashMap<String, Ring<f32>>,
     /// Per-pid CPU EWMA, decayed each tick. Pids absent in the latest tick
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
@@ -55,6 +68,9 @@ pub struct History {
     /// match the metric rings so scrubbing stays in sync. The Timeline tab
     /// drives scrubbing; other tabs read App::displayed_snap().
     pub session: Ring<Snapshot>,
+    /// Ring capacity, retained so per-device GPU series can be created lazily
+    /// at the same depth as the fixed rings above.
+    cap: usize,
 }
 
 impl History {
@@ -66,8 +82,11 @@ impl History {
             net_rate: Ring::new(cap),
             io_rate: Ring::new(cap),
             gpu_util: Ring::new(cap),
+            gpu_util_by_name: HashMap::new(),
+            gpu_vram_by_name: HashMap::new(),
             proc_cpu_ewma: HashMap::new(),
             session: Ring::new(cap),
+            cap,
         }
     }
 
@@ -95,6 +114,29 @@ impl History {
             .filter_map(|g| g.util_pct)
             .fold(0.0_f32, f32::max);
         self.gpu_util.push(gpu);
+
+        // Per-device series for the GPU tab's per-card sparkline. Only record
+        // a sample when the device actually reports util, so a device that
+        // never exposes it stays absent from the map (honest "no data" rather
+        // than a flat-zero line that looks like a genuinely idle GPU).
+        let cap = self.cap;
+        for g in &snap.gpus {
+            if let Some(u) = g.util_pct {
+                self.gpu_util_by_name
+                    .entry(g.name.clone())
+                    .or_insert_with(|| Ring::new(cap))
+                    .push(u);
+            }
+            // VRAM used fraction, same only-when-reported rule as util.
+            if let (Some(total), Some(used)) = (g.vram_total_bytes, g.vram_used_bytes) {
+                if total > 0 {
+                    self.gpu_vram_by_name
+                        .entry(g.name.clone())
+                        .or_insert_with(|| Ring::new(cap))
+                        .push((used as f32 / total as f32).clamp(0.0, 1.0));
+                }
+            }
+        }
 
         // Update per-pid EWMA. Alpha=0.3 → ~5 ticks to stabilize.
         // Prune pids that aren't in the current snapshot.
@@ -942,6 +984,183 @@ mod tests {
         h.push(&snap_with(vec![proc(1, 50.0)]));
         assert!(h.proc_cpu_ewma.contains_key(&1));
         assert!(!h.proc_cpu_ewma.contains_key(&2));
+    }
+
+    #[test]
+    fn gpu_util_by_name_records_only_devices_reporting_util() {
+        use crate::collect::GpuTick;
+        let mut h = History::new(10);
+        let snap = Snapshot {
+            gpus: vec![
+                GpuTick {
+                    name: "Apple M3 Max".into(),
+                    util_pct: Some(42.0),
+                    ..Default::default()
+                },
+                GpuTick {
+                    name: "headless dGPU".into(),
+                    util_pct: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        h.push(&snap);
+
+        // The reporting device gets its own series; the silent one stays
+        // absent so the tab can show "no live util" rather than a fake line.
+        assert_eq!(
+            h.gpu_util_by_name.get("Apple M3 Max").map(|r| r.to_vec()),
+            Some(vec![42.0])
+        );
+        assert!(!h.gpu_util_by_name.contains_key("headless dGPU"));
+        // Aggregate ring still carries the cross-device max.
+        assert_eq!(h.gpu_util.last().copied(), Some(42.0));
+    }
+
+    #[test]
+    fn gpu_util_by_name_appends_across_ticks() {
+        use crate::collect::GpuTick;
+        let mut h = History::new(10);
+        for u in [10.0_f32, 30.0, 55.0] {
+            h.push(&Snapshot {
+                gpus: vec![GpuTick {
+                    name: "gpu0".into(),
+                    util_pct: Some(u),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            h.gpu_util_by_name.get("gpu0").map(|r| r.to_vec()),
+            Some(vec![10.0, 30.0, 55.0])
+        );
+    }
+
+    #[test]
+    fn gpu_vram_by_name_records_used_fraction_only_when_reported() {
+        use crate::collect::GpuTick;
+        let mut h = History::new(10);
+        // Tick 1: full VRAM figures → fraction recorded.
+        h.push(&Snapshot {
+            gpus: vec![GpuTick {
+                name: "gpu0".into(),
+                vram_total_bytes: Some(1000),
+                vram_used_bytes: Some(250),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // Tick 2: total but no used → skipped (no fake sample).
+        h.push(&Snapshot {
+            gpus: vec![GpuTick {
+                name: "gpu0".into(),
+                vram_total_bytes: Some(1000),
+                vram_used_bytes: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            h.gpu_vram_by_name.get("gpu0").map(|r| r.to_vec()),
+            Some(vec![0.25])
+        );
+    }
+
+    #[test]
+    fn draw_does_not_panic_on_overview_and_gpu_with_live_gpu() {
+        use crate::collect::{CpuTick, GpuTick};
+        use crate::config::SyswatchConfig;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mk = |util: f32| Snapshot {
+            cpu: CpuTick {
+                usage_pct: 40.0,
+                per_core: vec![20.0, 60.0, 90.0, 10.0],
+                ..Default::default()
+            },
+            gpus: vec![GpuTick {
+                name: "Apple M3 Max".into(),
+                vendor: "Apple".into(),
+                util_pct: Some(util),
+                ..Default::default()
+            }],
+            procs: vec![proc(1, 50.0)],
+            ..Default::default()
+        };
+
+        let mut app = App::new(TabId::Overview, SyswatchConfig::default());
+        for u in [10.0_f32, 55.0, 80.0] {
+            app.history.push(&mk(u));
+        }
+        let last = mk(80.0);
+        app.snap = Some(last.clone());
+
+        // Tall backend so the GPU card is big enough to carve the chart strip.
+        for tab in [TabId::Overview, TabId::Gpu] {
+            app.active = tab;
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| draw(f, &app, &last))
+                .unwrap_or_else(|e| panic!("draw panicked on {:?}: {e}", tab));
+        }
+    }
+
+    #[test]
+    fn draw_does_not_panic_across_tabs_sizes_and_gpu_shapes() {
+        use crate::collect::{CpuTick, GpuTick};
+        use crate::config::SyswatchConfig;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let gpu = |name: &str, util: Option<f32>| GpuTick {
+            name: name.into(),
+            vendor: "Test".into(),
+            util_pct: util,
+            ..Default::default()
+        };
+
+        let gpu_sets: Vec<Vec<GpuTick>> = vec![
+            vec![],
+            vec![gpu("gpu0", Some(50.0))],
+            vec![gpu("gpu0", None)],
+            vec![gpu("iGPU", Some(20.0)), gpu("dGPU", Some(95.0))],
+            vec![gpu("iGPU", Some(20.0)), gpu("dGPU", None)],
+        ];
+
+        let sizes = [(10u16, 5u16), (20, 8), (40, 12), (80, 24), (200, 60)];
+
+        for gpus in &gpu_sets {
+            let mk = || Snapshot {
+                cpu: CpuTick {
+                    usage_pct: 40.0,
+                    per_core: vec![20.0, 60.0, 90.0, 10.0],
+                    ..Default::default()
+                },
+                gpus: gpus.clone(),
+                procs: vec![proc(1, 50.0)],
+                ..Default::default()
+            };
+            let mut app = App::new(TabId::Overview, SyswatchConfig::default());
+            for _ in 0..3 {
+                app.history.push(&mk());
+            }
+            let last = mk();
+            app.snap = Some(last.clone());
+
+            for &tab in ALL_TABS {
+                app.active = tab;
+                for &(w, h) in &sizes {
+                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    terminal.draw(|f| draw(f, &app, &last)).unwrap_or_else(|e| {
+                        panic!("draw panicked: tab={:?} size={}x{} gpus={}: {e}", tab, w, h, gpus.len())
+                    });
+                }
+            }
+        }
     }
 
     #[test]
