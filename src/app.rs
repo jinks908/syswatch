@@ -1156,7 +1156,13 @@ mod tests {
                 for &(w, h) in &sizes {
                     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
                     terminal.draw(|f| draw(f, &app, &last)).unwrap_or_else(|e| {
-                        panic!("draw panicked: tab={:?} size={}x{} gpus={}: {e}", tab, w, h, gpus.len())
+                        panic!(
+                            "draw panicked: tab={:?} size={}x{} gpus={}: {e}",
+                            tab,
+                            w,
+                            h,
+                            gpus.len()
+                        )
                     });
                 }
             }

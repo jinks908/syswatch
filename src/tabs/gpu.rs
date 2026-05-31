@@ -79,8 +79,20 @@ fn draw_card(f: &mut Frame, area: Rect, gpu: &GpuTick, app: &App, snap: &Snapsho
         .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
         .split(cols[0]);
 
-    draw_series(f, chart_rows[0], &util_spec(gpu, app), app.graph_style, app.graph_opts());
-    draw_series(f, chart_rows[1], &vram_spec(gpu, app), app.graph_style, app.graph_opts());
+    draw_series(
+        f,
+        chart_rows[0],
+        &util_spec(gpu, app),
+        app.graph_style,
+        app.graph_opts(),
+    );
+    draw_series(
+        f,
+        chart_rows[1],
+        &vram_spec(gpu, app),
+        app.graph_style,
+        app.graph_opts(),
+    );
     draw_counters(f, cols[1], gpu, snap);
 
     if let Some(engine_area) = engines {
@@ -106,13 +118,21 @@ fn util_spec<'a>(gpu: &'a GpuTick, app: &App) -> ChartSpec<'a> {
         .history
         .gpu_util_by_name
         .get(&gpu.name)
-        .map(|r| r.to_vec().iter().map(|v| (v / 100.0).clamp(0.0, 1.0)).collect())
+        .map(|r| {
+            r.to_vec()
+                .iter()
+                .map(|v| (v / 100.0).clamp(0.0, 1.0))
+                .collect()
+        })
         .unwrap_or_default();
-    let placeholder = gpu.live_data_hint.as_deref().unwrap_or(if gpu.util_pct.is_some() {
-        "collecting util…"
-    } else {
-        "no live util on this device"
-    });
+    let placeholder = gpu
+        .live_data_hint
+        .as_deref()
+        .unwrap_or(if gpu.util_pct.is_some() {
+            "collecting util…"
+        } else {
+            "no live util on this device"
+        });
     ChartSpec {
         label: "util",
         value: gpu
@@ -285,7 +305,11 @@ fn draw_counters(f: &mut Frame, area: Rect, gpu: &GpuTick, snap: &Snapshot) {
         // Keep the process name from blowing out the narrow column; the pid
         // is the part you copy, so it always stays visible.
         let name = truncate(&name, 14);
-        lines.push(kv("last sub", format!("{} ({})", name, pid), p::text_primary()));
+        lines.push(kv(
+            "last sub",
+            format!("{} ({})", name, pid),
+            p::text_primary(),
+        ));
     }
 
     f.render_widget(
@@ -384,7 +408,12 @@ mod tests {
         out
     }
 
-    fn spec(label: &'static str, value: &str, series: Vec<f32>, placeholder: &'static str) -> ChartSpec<'static> {
+    fn spec(
+        label: &'static str,
+        value: &str,
+        series: Vec<f32>,
+        placeholder: &'static str,
+    ) -> ChartSpec<'static> {
         ChartSpec {
             label,
             value: value.to_string(),
@@ -492,7 +521,10 @@ mod tests {
             .unwrap();
 
         let text = buffer_to_string(terminal.backend().buffer());
-        assert!(text.contains("per-engine"), "missing section label:\n{text}");
+        assert!(
+            text.contains("per-engine"),
+            "missing section label:\n{text}"
+        );
         assert!(text.contains("render"), "missing renderer row:\n{text}");
         assert!(text.contains("tiler"), "missing tiler row:\n{text}");
         assert!(text.contains("38.0%"), "missing renderer value:\n{text}");
