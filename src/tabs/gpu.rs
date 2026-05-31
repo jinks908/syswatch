@@ -89,7 +89,7 @@ fn draw_card(f: &mut Frame, area: Rect, gpu: &GpuTick, app: &App, snap: &Snapsho
     draw_series(
         f,
         chart_rows[1],
-        &vram_spec(gpu, app),
+        &vram_spec(gpu, app, snap.mem.total_bytes),
         app.graph_style,
         app.graph_opts(),
     );
@@ -146,7 +146,7 @@ fn util_spec<'a>(gpu: &'a GpuTick, app: &App) -> ChartSpec<'a> {
     }
 }
 
-fn vram_spec<'a>(gpu: &'a GpuTick, app: &App) -> ChartSpec<'a> {
+fn vram_spec<'a>(gpu: &'a GpuTick, app: &App, sys_total_bytes: u64) -> ChartSpec<'a> {
     let series = app
         .history
         .gpu_vram_by_name
@@ -155,7 +155,7 @@ fn vram_spec<'a>(gpu: &'a GpuTick, app: &App) -> ChartSpec<'a> {
         .unwrap_or_default();
     ChartSpec {
         label: "vram",
-        value: vram_value(gpu),
+        value: vram_value(gpu, sys_total_bytes),
         value_color: p::brand(),
         line_color: p::tx_rate(),
         series,
@@ -163,19 +163,42 @@ fn vram_spec<'a>(gpu: &'a GpuTick, app: &App) -> ChartSpec<'a> {
     }
 }
 
+/// The denominator the VRAM bar normalizes against: a discrete GPU's
+/// dedicated VRAM when reported, otherwise total system RAM (Apple Silicon
+/// unified memory). The bool flags the shared-memory case so the header can
+/// label it. Returns None when neither figure is available.
+fn vram_total_denominator(gpu: &GpuTick, sys_total_bytes: u64) -> Option<(u64, bool)> {
+    match gpu.vram_total_bytes {
+        Some(total) if total > 0 => Some((total, false)),
+        _ if sys_total_bytes > 0 => Some((sys_total_bytes, true)),
+        _ => None,
+    }
+}
+
 /// VRAM chart header: `used / total (pct%)`, degrading gracefully when only
-/// some of the figures are available.
-fn vram_value(gpu: &GpuTick) -> String {
-    match (gpu.vram_total_bytes, gpu.vram_used_bytes) {
-        (Some(total), Some(used)) if total > 0 => format!(
-            "{} / {} ({:.0}%)",
+/// some of the figures are available. On unified-memory systems the total is
+/// system RAM and gets a `shared` tag so the percentage isn't mistaken for a
+/// dedicated-VRAM figure.
+fn vram_value(gpu: &GpuTick, sys_total_bytes: u64) -> String {
+    match (
+        vram_total_denominator(gpu, sys_total_bytes),
+        gpu.vram_used_bytes,
+    ) {
+        (Some((total, shared)), Some(used)) => format!(
+            "{} / {}{} ({:.0}%)",
             human_bytes(used),
             human_bytes(total),
+            if shared { " shared" } else { "" },
             100.0 * used as f32 / total as f32
         ),
-        (Some(total), Some(used)) => format!("{} / {}", human_bytes(used), human_bytes(total)),
-        (Some(total), None) => format!("{} (used —)", human_bytes(total)),
-        _ => "—".into(),
+        (Some((total, shared)), None) => {
+            format!(
+                "{}{} (used —)",
+                human_bytes(total),
+                if shared { " shared" } else { "" }
+            )
+        }
+        (None, _) => "—".into(),
     }
 }
 
@@ -469,10 +492,13 @@ mod tests {
             vram_used_bytes: Some(12 * 1024 * 1024 * 1024),
             ..Default::default()
         };
+        // Discrete VRAM total wins; no shared tag.
+        let v = vram_value(&gpu, 64 * 1024 * 1024 * 1024);
+        assert!(v.contains("(25%)"), "expected 25% in {:?}", v);
         assert!(
-            vram_value(&gpu).contains("(25%)"),
-            "expected 25% in {:?}",
-            vram_value(&gpu)
+            !v.contains("shared"),
+            "discrete GPU shouldn't show shared in {:?}",
+            v
         );
         // Total but no used → honest about the missing figure.
         let partial = GpuTick {
@@ -480,7 +506,24 @@ mod tests {
             vram_used_bytes: None,
             ..Default::default()
         };
-        assert!(vram_value(&partial).contains("used —"));
+        assert!(vram_value(&partial, 0).contains("used —"));
+    }
+
+    #[test]
+    fn vram_value_falls_back_to_system_memory_when_no_discrete_total() {
+        // Apple Silicon: no dedicated VRAM total, but used is reported. The
+        // header normalizes against system RAM and tags it `shared`.
+        let gpu = GpuTick {
+            vram_total_bytes: None,
+            vram_used_bytes: Some(8 * 1024 * 1024 * 1024),
+            ..Default::default()
+        };
+        let v = vram_value(&gpu, 32 * 1024 * 1024 * 1024);
+        assert!(v.contains("(25%)"), "expected 25% of system RAM in {:?}", v);
+        assert!(v.contains("shared"), "expected shared tag in {:?}", v);
+        // Neither figure available → em dash.
+        let empty = GpuTick::default();
+        assert_eq!(vram_value(&empty, 0), "—");
     }
 
     #[test]
