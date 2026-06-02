@@ -46,12 +46,18 @@ Where `htop` shows you *what's running*, SysWatch shows you *what's happening* â
 ## Install
 
 ```bash
+# Homebrew (macOS + Linux) â€” prebuilt binaries
+brew install matthart1983/tap/syswatch
+
+# Cargo
+cargo install syswatch
+
+# From source
 git clone https://github.com/matthart1983/syswatch.git && cd syswatch
-cargo build --release
-./target/release/syswatch
+cargo build --release && ./target/release/syswatch
 ```
 
-**Prerequisites:** Rust 1.75+. No system dependencies on Linux. macOS links against the system frameworks.
+**Prerequisites (source/cargo builds):** Rust 1.75+. No system dependencies on Linux. macOS links against the system frameworks.
 
 ## Usage
 
