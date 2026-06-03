@@ -164,6 +164,16 @@ fn sample_inner() -> PowerTick {
         }
     }
 
+    // hwmon temperatures. AMD Ryzen (`k10temp`, labels Tctl/Tdie) and many
+    // laptop sensors expose CPU/package temps *only* via hwmon, never as a
+    // `/sys/class/thermal` zone — so an AMD box would otherwise show no CPU
+    // temperature at all. Merge them in, skipping names we already have.
+    for z in collect_hwmon_temps(Path::new("/sys/class/hwmon")) {
+        if !tick.thermal_zones.iter().any(|e| e.name == z.name) {
+            tick.thermal_zones.push(z);
+        }
+    }
+
     // Fans via hwmon (Linux exposes them per-chip, names vary).
     if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
         for entry in entries.flatten() {
@@ -335,9 +345,164 @@ fn read_trim(p: &std::path::Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Collect every `tempN_input` exposed by the hwmon chips under
+/// `hwmon_root` (normally `/sys/class/hwmon`), as `ThermalZone`s.
+///
+/// This is what surfaces CPU temperature on AMD: the `k10temp` driver
+/// publishes the package temperature here (labelled `Tctl`/`Tdie`) and,
+/// unlike Intel's `coretemp`/`x86_pkg_temp`, registers no `thermal_zone`.
+///
+/// Each zone is named `"<chip> <label>"` (e.g. `"k10temp Tctl"`) when a
+/// `tempN_label` is present, else `"<chip> tempN"`. Readings outside a
+/// sane range are dropped (some inputs read sentinel values when idle).
+/// Pure file-IO over a path so it's exercisable on any host via fixtures.
+#[cfg(any(target_os = "linux", test))]
+fn collect_hwmon_temps(hwmon_root: &std::path::Path) -> Vec<ThermalZone> {
+    let mut zones = Vec::new();
+    let Ok(entries) = std::fs::read_dir(hwmon_root) else {
+        return zones;
+    };
+    // Stable order so the panel doesn't reshuffle between ticks.
+    let mut chips: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    chips.sort();
+
+    for chip in chips {
+        let chip_name = read_trim(&chip.join("name")).unwrap_or_else(|| "hwmon".into());
+
+        // Scan the chip dir for `tempN_input` rather than guessing a range:
+        // `coretemp` uses sparse, high indices (Core 32 lands at temp34), so
+        // a fixed `1..=N` loop would silently drop sensors on many-core CPUs.
+        let Ok(files) = std::fs::read_dir(&chip) else {
+            continue;
+        };
+        let mut indices: Vec<u32> = files
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .strip_prefix("temp")?
+                    .strip_suffix("_input")?
+                    .parse::<u32>()
+                    .ok()
+            })
+            .collect();
+        indices.sort_unstable();
+
+        for i in indices {
+            let Some(raw) = read_trim(&chip.join(format!("temp{}_input", i)))
+                .and_then(|s| s.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            let temp_c = raw as f32 / 1000.0;
+            // hwmon temps are millidegrees; ignore obviously-bogus readings
+            // (disconnected sensors report values like -274°C or 0).
+            if !(temp_c > -40.0 && temp_c < 150.0) {
+                continue;
+            }
+            let name = match read_trim(&chip.join(format!("temp{}_label", i))) {
+                Some(label) if !label.is_empty() => format!("{} {}", chip_name, label),
+                _ => format!("{} temp{}", chip_name, i),
+            };
+            zones.push(ThermalZone { name, temp_c });
+        }
+    }
+    zones
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── hwmon temperature collection (AMD k10temp & friends) ─────────────
+
+    fn write(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Build a fake hwmon chip dir: `<root>/<dir>/name` + temp inputs/labels.
+    fn mk_chip(root: &std::path::Path, dir: &str, name: &str, temps: &[(u32, Option<&str>, &str)]) {
+        let chip = root.join(dir);
+        std::fs::create_dir_all(&chip).unwrap();
+        write(&chip.join("name"), name);
+        for (i, label, input) in temps {
+            if let Some(l) = label {
+                write(&chip.join(format!("temp{}_label", i)), l);
+            }
+            write(&chip.join(format!("temp{}_input", i)), input);
+        }
+    }
+
+    #[test]
+    fn hwmon_reads_k10temp_with_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        // AMD Ryzen: k10temp with Tctl/Tdie, in millidegrees.
+        mk_chip(
+            dir.path(),
+            "hwmon0",
+            "k10temp",
+            &[(1, Some("Tctl"), "52000"), (2, Some("Tdie"), "50125")],
+        );
+        let zones = collect_hwmon_temps(dir.path());
+        let tctl = zones.iter().find(|z| z.name == "k10temp Tctl").unwrap();
+        assert_eq!(tctl.temp_c, 52.0);
+        let tdie = zones.iter().find(|z| z.name == "k10temp Tdie").unwrap();
+        assert_eq!(tdie.temp_c, 50.125);
+    }
+
+    #[test]
+    fn hwmon_unlabeled_temp_uses_chip_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        mk_chip(dir.path(), "hwmon1", "amdgpu", &[(1, None, "45000")]);
+        let zones = collect_hwmon_temps(dir.path());
+        let edge = zones.iter().find(|z| z.name == "amdgpu temp1").unwrap();
+        assert_eq!(edge.temp_c, 45.0);
+    }
+
+    #[test]
+    fn hwmon_drops_bogus_readings() {
+        let dir = tempfile::tempdir().unwrap();
+        // -274°C (disconnected) and 999°C (sentinel) must be filtered out.
+        mk_chip(
+            dir.path(),
+            "hwmon0",
+            "nct6797",
+            &[(1, None, "-274000"), (2, None, "999000"), (3, None, "61000")],
+        );
+        let zones = collect_hwmon_temps(dir.path());
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].temp_c, 61.0);
+    }
+
+    #[test]
+    fn hwmon_missing_root_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(collect_hwmon_temps(&dir.path().join("does-not-exist")).is_empty());
+    }
+
+    #[test]
+    fn hwmon_reads_sparse_high_indices() {
+        // Real Intel coretemp uses non-contiguous, >32 indices (Core 32 at
+        // temp34). The dir scan must pick those up, not a fixed 1..=N loop.
+        let dir = tempfile::tempdir().unwrap();
+        mk_chip(
+            dir.path(),
+            "hwmon0",
+            "coretemp",
+            &[
+                (1, Some("Package id 0"), "45000"),
+                (10, Some("Core 8"), "39000"),
+                (34, Some("Core 32"), "44000"),
+                (35, Some("Core 33"), "44000"),
+            ],
+        );
+        let zones = collect_hwmon_temps(dir.path());
+        assert_eq!(zones.len(), 4);
+        assert!(zones.iter().any(|z| z.name == "coretemp Core 32" && z.temp_c == 44.0));
+        assert!(zones.iter().any(|z| z.name == "coretemp Core 33"));
+        // Sorted by index → Package (temp1) first.
+        assert_eq!(zones[0].name, "coretemp Package id 0");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
