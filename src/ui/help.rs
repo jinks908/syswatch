@@ -98,7 +98,7 @@ const GROUPS: &[Group] = &[
             },
             Row {
                 keys: "s",
-                label: "Cycle sort (cpu / rss / io / start / name / gpu / net)",
+                label: "Cycle sort (cpu / mem / io / start / name / gpu / net)",
             },
             Row {
                 keys: "/",

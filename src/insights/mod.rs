@@ -62,6 +62,18 @@ pub fn compute(h: &History, snap: &Snapshot) -> Vec<Insight> {
     if let Some(i) = insight_vram_high(snap) {
         out.push(i);
     }
+    if let Some(i) = insight_psi_memory(snap) {
+        out.push(i);
+    }
+    if let Some(i) = insight_psi_io(snap) {
+        out.push(i);
+    }
+    if let Some(i) = insight_energy_hog(h, snap) {
+        out.push(i);
+    }
+    if let Some(i) = insight_mem_leak(h, snap) {
+        out.push(i);
+    }
 
     // Most severe first; cap to the spec's ~6 cards budget.
     out.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -107,16 +119,32 @@ fn insight_swap_thrash(h: &History, snap: &Snapshot) -> Option<Insight> {
         return None;
     };
 
-    let top_rss = snap
+    // Name the most useful culprit the data can support: the biggest
+    // per-process swap holder when the sampler has it (the actual
+    // thrash driver), else the largest honest memory holder
+    // (footprint / PSS), else RSS as the last resort.
+    let culprit = snap
         .procs
         .iter()
-        .max_by_key(|p| p.mem_rss)
-        .map(|p| {
-            format!(
-                "{} holds the largest resident set ({}).",
-                p.name,
-                fmt_bytes(p.mem_rss)
-            )
+        .filter_map(|p| p.mem_swap.map(|s| (p, s)))
+        .filter(|(_, s)| *s > 0)
+        .max_by_key(|(_, s)| *s)
+        .map(|(p, s)| format!("{} holds the most swap ({}).", p.name, fmt_bytes(s)))
+        .or_else(|| {
+            snap.procs
+                .iter()
+                .filter_map(|p| p.mem_footprint.or(p.mem_pss).map(|m| (p, m)))
+                .max_by_key(|(_, m)| *m)
+                .map(|(p, m)| format!("{} holds the largest footprint ({}).", p.name, fmt_bytes(m)))
+        })
+        .or_else(|| {
+            snap.procs.iter().max_by_key(|p| p.mem_rss).map(|p| {
+                format!(
+                    "{} holds the largest resident set ({}).",
+                    p.name,
+                    fmt_bytes(p.mem_rss)
+                )
+            })
         })
         .unwrap_or_default();
 
@@ -129,7 +157,7 @@ fn insight_swap_thrash(h: &History, snap: &Snapshot) -> Option<Insight> {
                 fmt_bytes(snap.mem.swap_used_bytes),
                 fmt_bytes(snap.mem.swap_total_bytes.max(1))
             ),
-            top_rss,
+            culprit,
         ],
         suggested_tab: TabId::Memory,
     })
@@ -409,6 +437,153 @@ fn insight_vram_high(snap: &Snapshot) -> Option<Insight> {
             "Close other GPU clients or reduce model/batch sizes.".into(),
         ],
         suggested_tab: TabId::Gpu,
+    })
+}
+
+/// Kernel-reported memory stall time (PSI, Linux). `full` means every
+/// non-idle task was stalled at once — reclaim/thrash is actively
+/// costing throughput, regardless of what %used says.
+fn insight_psi_memory(snap: &Snapshot) -> Option<Insight> {
+    let psi = snap.pressure.as_ref()?;
+    let severity = if psi.mem_full >= 5.0 {
+        Severity::Crit
+    } else if psi.mem_some >= 10.0 {
+        Severity::Warn
+    } else {
+        return None;
+    };
+    Some(Insight {
+        severity,
+        title: format!(
+            "memory stall — tasks stalled {:.1}% of time (full {:.1}%)",
+            psi.mem_some, psi.mem_full
+        ),
+        body: vec![
+            "PSI avg10 from /proc/pressure/memory — direct kernel accounting of time lost to reclaim.".into(),
+            format!(
+                "RAM {} of {} used / swap {} used.",
+                fmt_bytes(snap.mem.used_bytes),
+                fmt_bytes(snap.mem.total_bytes),
+                fmt_bytes(snap.mem.swap_used_bytes)
+            ),
+        ],
+        suggested_tab: TabId::Memory,
+    })
+}
+
+/// Kernel-reported IO stall time (PSI, Linux) — catches a saturated
+/// disk even when raw throughput looks modest (small random IO).
+fn insight_psi_io(snap: &Snapshot) -> Option<Insight> {
+    let psi = snap.pressure.as_ref()?;
+    let severity = if psi.io_full >= 15.0 {
+        Severity::Crit
+    } else if psi.io_some >= 25.0 {
+        Severity::Warn
+    } else {
+        return None;
+    };
+    // Name the heaviest IO process to make the card actionable.
+    let top_io = snap
+        .procs
+        .iter()
+        .max_by(|a, b| {
+            (a.io_read_rate + a.io_write_rate)
+                .partial_cmp(&(b.io_read_rate + b.io_write_rate))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .filter(|p| p.io_read_rate + p.io_write_rate > 0.0)
+        .map(|p| {
+            format!(
+                "{} is the heaviest IO proc ({} read / {} write).",
+                p.name,
+                crate::ui::widgets::human_rate(p.io_read_rate),
+                crate::ui::widgets::human_rate(p.io_write_rate)
+            )
+        })
+        .unwrap_or_else(|| "no single process dominates the visible IO.".into());
+    Some(Insight {
+        severity,
+        title: format!(
+            "io stall — tasks blocked on disk {:.1}% of time (full {:.1}%)",
+            psi.io_some, psi.io_full
+        ),
+        body: vec!["PSI avg10 from /proc/pressure/io.".into(), top_io],
+        suggested_tab: TabId::Disks,
+    })
+}
+
+/// A single process sustaining a heavy billed-power draw (macOS).
+fn insight_energy_hog(h: &History, snap: &Snapshot) -> Option<Insight> {
+    let (pid, ewma) = h
+        .proc_power_ewma
+        .iter()
+        .map(|(pid, w)| (*pid, *w))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    if ewma < 8.0 {
+        return None;
+    }
+    let proc_ = snap.procs.iter().find(|p| p.pid == pid)?;
+    let severity = if ewma >= 15.0 {
+        Severity::Warn
+    } else {
+        Severity::Info
+    };
+    Some(Insight {
+        severity,
+        title: format!(
+            "energy hog — {} (pid {}) drawing ~{:.1} W sustained",
+            proc_.name, pid, ewma
+        ),
+        body: vec![
+            format!(
+                "instantaneous ~{:.1} W / cpu {:.1}%",
+                proc_.power_w.unwrap_or(0.0),
+                proc_.cpu_pct
+            ),
+            "Estimate: measured CPU-rail power (IOReport) split by CPU share.".into(),
+        ],
+        suggested_tab: TabId::Power,
+    })
+}
+
+/// Leak heuristic: a process whose *honest* memory metric (footprint /
+/// private — pages that are really its own) has grown substantially
+/// and proportionally since we first saw it. RSS is deliberately not
+/// used: shared-page noise makes it cry wolf.
+fn insight_mem_leak(h: &History, snap: &Snapshot) -> Option<Insight> {
+    // ~2 minutes of sightings before judging; both absolute and
+    // relative growth required so neither big-but-stable nor
+    // tiny-but-doubling procs trip it.
+    const MIN_TICKS: u32 = 120;
+    const MIN_GROWTH: u64 = 256 * MIB;
+    let (pid, (base, _ticks, latest)) = h
+        .proc_mem_track
+        .iter()
+        .filter(|(_, (base, ticks, latest))| {
+            *ticks >= MIN_TICKS
+                && latest.saturating_sub(*base) >= MIN_GROWTH
+                && (*latest as f64) >= (*base as f64) * 1.3
+        })
+        .max_by_key(|(_, (base, _, latest))| latest.saturating_sub(*base))?;
+    let proc_ = snap.procs.iter().find(|p| p.pid == *pid)?;
+    let grown = latest.saturating_sub(*base);
+    Some(Insight {
+        severity: Severity::Warn,
+        title: format!(
+            "possible leak — {} (pid {}) grew {} this session",
+            proc_.name,
+            pid,
+            fmt_bytes(grown)
+        ),
+        body: vec![
+            format!(
+                "{} → {} (private/footprint, shared pages excluded)",
+                fmt_bytes(*base),
+                fmt_bytes(*latest)
+            ),
+            "Sustained private-memory growth without plateau is the classic leak signature.".into(),
+        ],
+        suggested_tab: TabId::Memory,
     })
 }
 

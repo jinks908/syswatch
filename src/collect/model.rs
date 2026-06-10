@@ -189,14 +189,20 @@ pub struct ProcTick {
     pub cpu_pct: f32,
     pub mem_rss: u64,
     pub mem_virt: u64,
-    pub threads: u32,
+    /// Real thread count — /proc/PID/status `Threads:` on Linux,
+    /// proc_pidinfo(PROC_PIDTASKINFO) on macOS. None when the platform
+    /// call fails (other users' procs on macOS without sudo).
+    pub threads: Option<u32>,
     pub state: char,
     pub start_time: Option<SystemTime>,
-    pub io_rate: f64, // bytes/sec read + written, computed against previous tick
-    /// Per-process network rates in bytes/sec, attributed proportionally
-    /// by ESTABLISHED connection count (kernel doesn't expose true
-    /// per-PID byte accounting cheaply on either macOS or Linux). None
-    /// on platforms where the SDK can't enumerate connections.
+    /// Disk IO split by direction, bytes/sec against the previous tick.
+    pub io_read_rate: f64,
+    pub io_write_rate: f64,
+    /// Per-process network rates in bytes/sec. Measured per-PID kernel
+    /// counters via nettop on macOS; elsewhere an estimate that splits
+    /// non-loopback interface throughput by connection count (see
+    /// `Snapshot::net_rates_estimated`). None when neither source has
+    /// data for this proc.
     pub net_rx_rate: Option<f64>,
     pub net_tx_rate: Option<f64>,
     /// Per-process GPU utilization (0..100). Sourced from nvml on
@@ -207,6 +213,43 @@ pub struct ProcTick {
     /// Per-process GPU memory bytes — VRAM held by the process. Same
     /// platform availability as `gpu_pct`.
     pub gpu_mem_bytes: Option<u64>,
+    /// Deeper memory attribution from `ProcMemCollector` — sampled for
+    /// the top procs by RSS only, so most rows carry None. macOS:
+    /// phys_footprint (Activity Monitor's Memory column). None elsewhere.
+    pub mem_footprint: Option<u64>,
+    /// Linux PSS — shared pages divided by mapper count, so PSS sums
+    /// to the real footprint where RSS double-counts. None elsewhere.
+    pub mem_pss: Option<u64>,
+    /// Linux private (clean+dirty) — what frees if the process exits.
+    pub mem_private: Option<u64>,
+    /// Linux shared (clean+dirty).
+    pub mem_shared: Option<u64>,
+    /// Linux per-process swap.
+    pub mem_swap: Option<u64>,
+    /// Lifetime peak memory — VmHWM (peak RSS) on Linux,
+    /// ri_lifetime_max_phys_footprint on macOS. The "what nearly
+    /// OOM'd overnight" number.
+    pub mem_peak: Option<u64>,
+    /// Estimated per-process power: measured CPU-rail wattage
+    /// (IOReport, macOS) apportioned by CPU share. An estimate —
+    /// rendered with `~` — since true per-process energy isn't
+    /// readable without sudo on any platform. None on non-macOS.
+    pub power_w: Option<f32>,
+}
+
+/// Pressure Stall Information (Linux ≥4.20) — the kernel's direct
+/// account of time tasks spent stalled waiting on a resource, as avg10
+/// percentages. `some` = at least one task stalled; `full` = every
+/// non-idle task stalled at once (severe; productivity is being lost).
+/// Unlike load average or %util, PSI distinguishes "busy but fine"
+/// from "actually starved".
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct PressureTick {
+    pub cpu_some: f32,
+    pub mem_some: f32,
+    pub mem_full: f32,
+    pub io_some: f32,
+    pub io_full: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -222,6 +265,13 @@ pub struct Snapshot {
     pub gpus: Vec<GpuTick>,
     pub power: PowerTick,
     pub services: Vec<ServiceTick>,
+    /// True when per-proc net rates are connection-count estimates
+    /// rather than measured counters — drives the `~` on the NET
+    /// column headers.
+    pub net_rates_estimated: bool,
+    /// PSI stall percentages. None on non-Linux and on kernels
+    /// without CONFIG_PSI.
+    pub pressure: Option<PressureTick>,
 }
 
 impl Default for Snapshot {
@@ -238,6 +288,8 @@ impl Default for Snapshot {
             gpus: Vec::new(),
             power: PowerTick::default(),
             services: Vec::new(),
+            net_rates_estimated: true,
+            pressure: None,
         }
     }
 }

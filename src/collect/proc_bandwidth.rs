@@ -1,20 +1,23 @@
-//! Per-process network bandwidth attribution.
+//! Per-process network bandwidth — measured where the platform allows,
+//! attributed where it doesn't.
 //!
-//! Wraps `netwatch_sdk::collectors::process_bandwidth::attribute`, which
-//! splits the host's interface throughput proportionally to each
-//! process's ESTABLISHED connection count. The kernel doesn't expose
-//! true per-PID byte accounting cheaply on either macOS or Linux, so
-//! this is an approximation — but it's the same shape netwatch's TUI
-//! uses, and good enough to answer "which process is eating the wire."
+//! **macOS**: `nettop -P` reports true per-process byte counters from
+//! the kernel's ntstat (no sudo). The worker keeps the previous
+//! cumulative sample and deltas into rates — these are measurements,
+//! not estimates, and the UI shows them unmarked.
 //!
-//! Costs: `lsof` (macOS) and `ss` (Linux) take 50–500 ms on a busy host.
-//! We cache the per-PID map for `REFRESH` and re-sample no more often
-//! than that, so the procs tab stays smooth even at sub-second tick
-//! rates.
+//! **Linux / fallback**: true per-PID byte accounting needs eBPF and
+//! privileges, so we split the host's non-loopback interface throughput
+//! proportionally to each process's connection count (TCP ESTABLISHED
+//! plus connected UDP, so QUIC-heavy processes aren't invisible).
+//! Every connection is weighted equally — an idle SSH session counts
+//! the same as a busy stream — so these are estimates and the UI
+//! prefixes the column headers with `~`.
 //!
-//! We parse the platform commands locally instead of calling the SDK's full
-//! `collect_connections()`: macOS enriches RTT via `nettop`, but syswatch's
-//! per-process bandwidth attribution does not use RTT and should not wait on it.
+//! Costs: `nettop` / `lsof` (macOS) and `ss` (Linux) take 50–500 ms on
+//! a busy host. We cache the per-PID map for `REFRESH` and re-sample no
+//! more often than that, so the procs tab stays smooth even at
+//! sub-second tick rates.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -23,8 +26,6 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use netwatch_sdk::collectors::connections::ConnectionDetail;
-use netwatch_sdk::collectors::process_bandwidth::attribute;
-use netwatch_sdk::types::InterfaceMetric;
 
 use super::model::InterfaceTick;
 
@@ -34,9 +35,16 @@ const COMMAND_TIMEOUT: Duration = Duration::from_millis(1500);
 /// growth on hosts with thousands of connections.
 const MAX_PROCS: usize = 256;
 
+/// Per-PID (rx_rate, tx_rate) map plus the estimated-vs-measured flag.
+type BandwidthResult = (HashMap<u32, (f64, f64)>, bool);
+
 pub struct ProcessBandwidthCollector {
     last_request_at: Option<Instant>,
     cached: HashMap<u32, (f64, f64)>, // pid -> (rx_rate, tx_rate)
+    /// Whether `cached` came from the connection-count approximation
+    /// (true) or real per-PID counters (false). Drives the `~` marker
+    /// on the NET column headers.
+    cached_estimated: bool,
     in_flight: bool,
     // Bounded request channel (capacity 1). The `in_flight` guard
     // already serializes requests, so this should never block or hit
@@ -44,7 +52,7 @@ pub struct ProcessBandwidthCollector {
     // guard, the bounded channel turns a silent OOM into a visible
     // dropped tick instead.
     request_tx: Option<SyncSender<Vec<InterfaceTick>>>,
-    result_rx: Receiver<HashMap<u32, (f64, f64)>>,
+    result_rx: Receiver<BandwidthResult>,
 }
 
 impl ProcessBandwidthCollector {
@@ -57,25 +65,27 @@ impl ProcessBandwidthCollector {
             .ok()
             .map(|_| request_tx);
         Self {
-            // Avoid paying the lsof/ss subprocess cost on the first frame.
-            // Per-PID bandwidth is a refinement; the dashboard should render
-            // even if connection enumeration is slow on a busy host.
+            // Avoid paying the nettop/lsof/ss subprocess cost on the first
+            // frame. Per-PID bandwidth is a refinement; the dashboard should
+            // render even if connection enumeration is slow on a busy host.
             last_request_at: Some(Instant::now()),
             cached: HashMap::new(),
+            cached_estimated: true,
             in_flight: false,
             request_tx,
             result_rx,
         }
     }
 
-    /// Returns the per-PID rate map. Re-collects at most every REFRESH;
-    /// otherwise returns the cached map. `current_net` is whatever the
-    /// outer Collector just gathered for interfaces — we re-shape it
-    /// into the SDK's `InterfaceMetric` so the attribution function can
-    /// allocate by interface throughput.
-    pub fn sample(&mut self, current_net: &[InterfaceTick]) -> HashMap<u32, (f64, f64)> {
-        while let Ok(result) = self.result_rx.try_recv() {
+    /// Returns the per-PID rate map plus whether it's an estimate
+    /// (connection-count attribution) or measured (nettop). Re-collects
+    /// at most every REFRESH; otherwise returns the cached map.
+    /// `current_net` is whatever the outer Collector just gathered for
+    /// interfaces — the approximation allocates its throughput.
+    pub fn sample(&mut self, current_net: &[InterfaceTick]) -> BandwidthResult {
+        while let Ok((result, estimated)) = self.result_rx.try_recv() {
             self.cached = result;
+            self.cached_estimated = estimated;
             self.in_flight = false;
         }
 
@@ -103,16 +113,28 @@ impl ProcessBandwidthCollector {
                 }
             }
         }
-        self.cached.clone()
+        (self.cached.clone(), self.cached_estimated)
     }
 }
 
 fn bandwidth_worker(
     request_rx: &Receiver<Vec<InterfaceTick>>,
-    result_tx: &std::sync::mpsc::Sender<HashMap<u32, (f64, f64)>>,
+    result_tx: &std::sync::mpsc::Sender<BandwidthResult>,
 ) -> WorkerOutcome {
+    // nettop counters are cumulative, so the measured path is stateful:
+    // the state lives for the worker's lifetime and resets (one blank
+    // interval) if the worker is restarted after a panic.
+    #[cfg(target_os = "macos")]
+    let mut nettop = NettopState::default();
     while let Ok(current_net) = request_rx.recv() {
-        if result_tx.send(compute(&current_net)).is_err() {
+        #[cfg(target_os = "macos")]
+        let result = match nettop.sample() {
+            Some(measured) => (measured, false),
+            None => (compute_approx(&current_net), true),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let result = (compute_approx(&current_net), true);
+        if result_tx.send(result).is_err() {
             return WorkerOutcome::ChannelDisconnected;
         }
     }
@@ -134,7 +156,7 @@ const WORKER_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// channel disconnect exits without retrying.
 fn run_bandwidth_worker_with_recovery(
     request_rx: Receiver<Vec<InterfaceTick>>,
-    result_tx: std::sync::mpsc::Sender<HashMap<u32, (f64, f64)>>,
+    result_tx: std::sync::mpsc::Sender<BandwidthResult>,
 ) {
     let mut backoff = WORKER_BACKOFF_INITIAL;
     loop {
@@ -164,37 +186,196 @@ fn run_bandwidth_worker_with_recovery(
     }
 }
 
-fn compute(current_net: &[InterfaceTick]) -> HashMap<u32, (f64, f64)> {
-    let conns = collect_process_connections();
-    if conns.is_empty() {
+fn compute_approx(current_net: &[InterfaceTick]) -> HashMap<u32, (f64, f64)> {
+    approx_from(&collect_process_connections(), current_net)
+}
+
+/// Split non-loopback interface throughput across processes by their
+/// share of attributable connections. Pure so tests can drive it with
+/// synthetic connections + interfaces.
+fn approx_from(
+    conns: &[ConnectionDetail],
+    current_net: &[InterfaceTick],
+) -> HashMap<u32, (f64, f64)> {
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    let mut total: u32 = 0;
+    for c in conns {
+        let Some(pid) = c.pid else { continue };
+        if !counts_toward_attribution(c) {
+            continue;
+        }
+        *counts.entry(pid).or_insert(0) += 1;
+        total += 1;
+    }
+    if total == 0 {
         return HashMap::new();
     }
-    let metrics: Vec<InterfaceMetric> = current_net
+
+    // Loopback stays out of the totals: local app↔db traffic shows up
+    // as both rx and tx on lo and would otherwise be handed to procs
+    // that only hold internet connections.
+    let (rx_total, tx_total) = current_net
         .iter()
-        .map(|i| InterfaceMetric {
-            name: i.name.clone(),
-            is_up: i.is_up,
-            rx_bytes: i.rx_bytes,
-            tx_bytes: i.tx_bytes,
-            rx_bytes_delta: 0,
-            tx_bytes_delta: 0,
-            rx_packets: 0,
-            tx_packets: 0,
-            rx_errors: 0,
-            tx_errors: 0,
-            rx_drops: 0,
-            tx_drops: 0,
-            rx_rate: Some(i.rx_rate),
-            tx_rate: Some(i.tx_rate),
-            rx_history: None,
-            tx_history: None,
-        })
-        .collect();
-    let attributed = attribute(&conns, &metrics, MAX_PROCS);
-    attributed
+        .filter(|i| !is_loopback_iface(&i.name))
+        .fold((0.0, 0.0), |acc, i| (acc.0 + i.rx_rate, acc.1 + i.tx_rate));
+
+    let mut by_count: Vec<(u32, u32)> = counts.into_iter().collect();
+    by_count.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+    by_count.truncate(MAX_PROCS);
+    by_count
         .into_iter()
-        .filter_map(|p| p.pid.map(|pid| (pid, (p.rx_rate, p.tx_rate))))
+        .map(|(pid, count)| {
+            let fraction = count as f64 / total as f64;
+            (pid, (rx_total * fraction, tx_total * fraction))
+        })
         .collect()
+}
+
+/// Which sockets earn a slice of the throughput pool. TCP ESTABLISHED
+/// plus connected UDP — QUIC carries a large share of browser traffic
+/// and would otherwise be attributed to whoever holds TCP connections.
+/// Loopback flows never count: their bytes aren't in the (non-loopback)
+/// pool being divided.
+fn counts_toward_attribution(c: &ConnectionDetail) -> bool {
+    if is_loopback_addr(&c.local_addr) || is_loopback_addr(&c.remote_addr) {
+        return false;
+    }
+    // ss reports connected UDP as ESTAB too; this arm covers TCP on
+    // both platforms and UDP on Linux.
+    if c.state == "ESTABLISHED" {
+        return true;
+    }
+    // macOS lsof emits UDP flows without a state line; a concrete
+    // remote peer is the "connected" signal there.
+    c.protocol.eq_ignore_ascii_case("udp") && has_peer(&c.remote_addr)
+}
+
+/// Unconnected sockets show a wildcard peer: `*:*` from lsof,
+/// `0.0.0.0:*` / `[::]:*` from ss.
+fn has_peer(addr: &str) -> bool {
+    !addr.is_empty() && !addr.ends_with(":*")
+}
+
+fn is_loopback_addr(addr: &str) -> bool {
+    // Covers ss ("127.0.0.1:80", "[::1]:80") and the lsof parser's
+    // bracket-stripped form ("::1]:50000").
+    addr.starts_with("127.") || addr.starts_with("::1") || addr.starts_with("[::1")
+}
+
+fn is_loopback_iface(name: &str) -> bool {
+    // lo (Linux), lo0/lo1… (BSD/macOS).
+    name == "lo"
+        || (name.len() > 2
+            && name.starts_with("lo")
+            && name[2..].chars().all(|c| c.is_ascii_digit()))
+}
+
+// ── macOS measured path (nettop) ───────────────────────────────────
+
+/// Stateful nettop sampler. `nettop -P` reports cumulative per-process
+/// bytes from the kernel's ntstat — true measurement, no sudo. Rates
+/// need two samples, so the first call primes the counters and returns
+/// an empty (but still "measured") map.
+/// pid → cumulative (bytes_in, bytes_out) as nettop reports them.
+#[cfg(any(target_os = "macos", test))]
+type NettopCounters = HashMap<u32, (u64, u64)>;
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct NettopState {
+    prev: Option<(NettopCounters, Instant)>,
+}
+
+#[cfg(target_os = "macos")]
+impl NettopState {
+    /// None = nettop missing/failed/empty → caller falls back to the
+    /// connection-count approximation for this round.
+    fn sample(&mut self) -> Option<HashMap<u32, (f64, f64)>> {
+        // -t external keeps loopback traffic out of the counters so
+        // the numbers describe the wire, matching the host-level KPIs.
+        let text = run_command_with_timeout(
+            "nettop",
+            &[
+                "-P",
+                "-J",
+                "bytes_in,bytes_out",
+                "-t",
+                "external",
+                "-x",
+                "-L",
+                "1",
+            ],
+            COMMAND_TIMEOUT,
+        )?;
+        let cur = parse_nettop(&text);
+        if cur.is_empty() {
+            return None;
+        }
+        let now = Instant::now();
+        let out = match self.prev.take() {
+            Some((prev, at)) => {
+                let dt = now.duration_since(at).as_secs_f64().max(0.001);
+                cur.iter()
+                    .filter_map(|(pid, &(rx, tx))| {
+                        // PIDs without a previous sample wait a round;
+                        // saturating_sub absorbs pid-reuse counter resets.
+                        let &(prx, ptx) = prev.get(pid)?;
+                        Some((
+                            *pid,
+                            (
+                                rx.saturating_sub(prx) as f64 / dt,
+                                tx.saturating_sub(ptx) as f64 / dt,
+                            ),
+                        ))
+                    })
+                    .collect()
+            }
+            None => HashMap::new(),
+        };
+        self.prev = Some((cur, now));
+        Some(out)
+    }
+}
+
+/// Parse `nettop -P -J bytes_in,bytes_out -x -L 1` CSV into
+/// pid → cumulative (bytes_in, bytes_out). Row shape:
+/// `time,name.pid,bytes_in,bytes_out,` — the name is nettop-truncated
+/// but the pid after the last dot survives, and a name containing
+/// commas just widens the row (byte columns are anchored to the end).
+#[cfg(any(target_os = "macos", test))]
+fn parse_nettop(text: &str) -> NettopCounters {
+    let mut out = NettopCounters::new();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let n = fields.len();
+        // Trailing comma yields an empty last field; tolerate its absence.
+        let (in_idx, out_idx) = if fields[n - 1].is_empty() {
+            (n - 3, n - 2)
+        } else {
+            (n - 2, n - 1)
+        };
+        let Ok(bytes_in) = fields[in_idx].parse::<u64>() else {
+            continue;
+        };
+        let Ok(bytes_out) = fields[out_idx].parse::<u64>() else {
+            continue;
+        };
+        let name_pid = fields[1..in_idx].join(",");
+        let Some((_, pid_str)) = name_pid.rsplit_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        // -P emits one row per process; sum defensively if it doesn't.
+        let e = out.entry(pid).or_insert((0, 0));
+        e.0 = e.0.saturating_add(bytes_in);
+        e.1 = e.1.saturating_add(bytes_out);
+    }
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -449,11 +630,11 @@ mod tests {
 
     #[test]
     fn empty_interfaces_yields_zero_rates() {
-        // No interfaces means the SDK has no throughput to allocate;
-        // any PIDs returned (real ESTABLISHED conns on the test host)
-        // must therefore have zero rates. We don't assert empty
-        // because the host running tests typically has active sockets.
-        let map = compute(&[]);
+        // No interfaces means no throughput to allocate; any PIDs
+        // returned (real conns on the test host) must therefore have
+        // zero rates. We don't assert empty because the host running
+        // tests typically has active sockets.
+        let map = compute_approx(&[]);
         for (_pid, (rx, tx)) in &map {
             assert_eq!(*rx, 0.0);
             assert_eq!(*tx, 0.0);
@@ -471,6 +652,147 @@ mod tests {
         let first_at = c.last_request_at;
         let _ = c.sample(&[]);
         assert_eq!(c.last_request_at, first_at);
+    }
+
+    // ── attribution math ────────────────────────────────────────────
+
+    fn tick(name: &str, rx_rate: f64, tx_rate: f64) -> InterfaceTick {
+        InterfaceTick {
+            name: name.into(),
+            is_up: true,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            rx_rate,
+            tx_rate,
+        }
+    }
+
+    fn conn_at(name: &str, pid: u32, proto: &str, state: &str, remote: &str) -> ConnectionDetail {
+        ConnectionDetail {
+            protocol: proto.into(),
+            local_addr: "192.168.1.5:50000".into(),
+            remote_addr: remote.into(),
+            state: state.into(),
+            pid: Some(pid),
+            process_name: Some(name.into()),
+            kernel_rtt_us: None,
+        }
+    }
+
+    #[test]
+    fn loopback_interfaces_excluded_from_pool() {
+        // 1000 B/s on en0 + 9000 B/s of local app↔db chatter on lo0.
+        // The single internet-holding proc must get en0's 1000, not 10000.
+        let conns = vec![conn_at("curl", 1, "TCP", "ESTABLISHED", "1.1.1.1:443")];
+        let net = [tick("en0", 1000.0, 500.0), tick("lo0", 9000.0, 9000.0)];
+        let map = approx_from(&conns, &net);
+        let (rx, tx) = map[&1];
+        assert!((rx - 1000.0).abs() < 0.01);
+        assert!((tx - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn loopback_connections_excluded_from_counts() {
+        // postgres holds 8 loopback conns; curl holds the only conn
+        // that can carry the wire traffic — curl gets all of it.
+        let mut conns = vec![conn_at("curl", 1, "TCP", "ESTABLISHED", "1.1.1.1:443")];
+        for _ in 0..8 {
+            let mut c = conn_at("postgres", 2, "TCP", "ESTABLISHED", "127.0.0.1:5432");
+            c.local_addr = "127.0.0.1:60000".into();
+            conns.push(c);
+        }
+        let map = approx_from(&conns, &[tick("en0", 1000.0, 500.0)]);
+        assert!((map[&1].0 - 1000.0).abs() < 0.01);
+        assert!(!map.contains_key(&2));
+    }
+
+    #[test]
+    fn connected_udp_counts_toward_attribution() {
+        // QUIC-style: chrome holds one connected UDP flow (no state from
+        // lsof), curl one TCP ESTABLISHED. They split the pool evenly.
+        let conns = vec![
+            conn_at("chrome", 1, "udp", "", "142.250.70.78:443"),
+            conn_at("curl", 2, "TCP", "ESTABLISHED", "1.1.1.1:443"),
+        ];
+        let map = approx_from(&conns, &[tick("en0", 1000.0, 0.0)]);
+        assert!((map[&1].0 - 500.0).abs() < 0.01);
+        assert!((map[&2].0 - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn unconnected_udp_does_not_count() {
+        // mDNS-style listener with a wildcard peer earns no share.
+        let conns = vec![
+            conn_at("mDNSResponder", 1, "udp", "", "*:*"),
+            conn_at("mDNSResponder", 2, "UDP", "UNCONN", "0.0.0.0:*"),
+            conn_at("curl", 3, "TCP", "ESTABLISHED", "1.1.1.1:443"),
+        ];
+        let map = approx_from(&conns, &[tick("en0", 1000.0, 0.0)]);
+        assert!(!map.contains_key(&1));
+        assert!(!map.contains_key(&2));
+        assert!((map[&3].0 - 1000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn loopback_iface_names() {
+        assert!(is_loopback_iface("lo"));
+        assert!(is_loopback_iface("lo0"));
+        assert!(is_loopback_iface("lo1"));
+        assert!(!is_loopback_iface("local0"));
+        assert!(!is_loopback_iface("en0"));
+        assert!(!is_loopback_iface("eth0"));
+    }
+
+    #[test]
+    fn loopback_addr_forms() {
+        assert!(is_loopback_addr("127.0.0.1:5432"));
+        assert!(is_loopback_addr("[::1]:443"));
+        // The lsof parser's bracket-stripped quirk form.
+        assert!(is_loopback_addr("::1]:50000"));
+        assert!(!is_loopback_addr("1.1.1.1:443"));
+        assert!(!is_loopback_addr("[2001:db8::1]:443"));
+    }
+
+    // ── nettop parser ───────────────────────────────────────────────
+
+    #[test]
+    fn nettop_parses_cumulative_bytes_per_pid() {
+        // Captured shape from `nettop -P -J bytes_in,bytes_out -x -L 1`.
+        let text = "\
+time,,bytes_in,bytes_out,
+19:29:46.164657,apsd.357,363400,305841,
+19:29:46.164658,mDNSResponder.407,93595431,55094516,
+19:29:46.164659,com.apple.WebKi.27364,78373,985908,
+";
+        let map = parse_nettop(text);
+        assert_eq!(map[&357], (363400, 305841));
+        assert_eq!(map[&407], (93595431, 55094516));
+        // Dotted (truncated) names still yield the trailing pid.
+        assert_eq!(map[&27364], (78373, 985908));
+    }
+
+    #[test]
+    fn nettop_handles_comma_in_process_name() {
+        let text = "\
+time,,bytes_in,bytes_out,
+19:29:46.1,weird,name.42,100,200,
+";
+        let map = parse_nettop(text);
+        assert_eq!(map[&42], (100, 200));
+    }
+
+    #[test]
+    fn nettop_skips_header_and_garbage() {
+        let text = "\
+time,,bytes_in,bytes_out,
+not-a-row
+19:29:46.1,nopid,100,200,
+19:29:46.1,ok.7,x,200,
+19:29:46.1,fine.9,1,2,
+";
+        let map = parse_nettop(text);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[&9], (1, 2));
     }
 
     #[test]

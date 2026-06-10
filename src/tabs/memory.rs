@@ -10,7 +10,7 @@ use crate::app::{App, Snapshot};
 use crate::ui::{
     graph::GraphStyle,
     palette as p,
-    widgets::{block_bar_styled, human_bytes, panel},
+    widgets::{block_bar_styled, human_bytes, mem_pct, panel},
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -25,7 +25,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 
     draw_ram_bar(f, v[0], snap, app.graph_style);
     draw_swap(f, v[1], snap, app.graph_style);
-    draw_top_rss(f, v[2], app, snap);
+    draw_proc_breakdown(f, v[2], app, snap);
 }
 
 fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
@@ -45,7 +45,7 @@ fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
         p::status_good()
     };
 
-    let header = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled("used ", Style::default().fg(p::text_muted())),
         Span::styled(
             human_bytes(used),
@@ -59,7 +59,27 @@ fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
         ),
         Span::styled("    available ", Style::default().fg(p::text_muted())),
         Span::styled(human_bytes(avail), Style::default().fg(p::text_primary())),
-    ]);
+    ];
+    // PSI: stall time is the honest pressure signal — %used can be
+    // high while nothing is starved, and vice versa.
+    if let Some(psi) = &snap.pressure {
+        let stall_color = if psi.mem_full >= 5.0 {
+            p::status_error()
+        } else if psi.mem_some >= 10.0 {
+            p::status_warn()
+        } else {
+            p::text_primary()
+        };
+        header_spans.push(Span::styled(
+            "    stall ",
+            Style::default().fg(p::text_muted()),
+        ));
+        header_spans.push(Span::styled(
+            format!("{:.1}% some / {:.1}% full", psi.mem_some, psi.mem_full),
+            Style::default().fg(stall_color),
+        ));
+    }
+    let header = Line::from(header_spans);
     let bar = block_bar_styled(pct, inner.width, color, style);
     f.render_widget(
         Paragraph::new(vec![header, Line::from(""), bar]).style(Style::default().bg(p::bg())),
@@ -114,47 +134,79 @@ fn draw_swap(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
     );
 }
 
-fn draw_top_rss(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let block = panel("Top processes (by RSS)");
+/// Per-process memory breakdown. RSS double-counts shared pages, so
+/// where the platform sampler delivered honest accounting we lead with
+/// it: phys_footprint on macOS (Activity Monitor's Memory column),
+/// PSS + private/shared/swap from smaps_rollup on Linux. Detail is
+/// sampled for the top procs by RSS and only for procs the user can
+/// inspect without sudo — rows without it show "—" and fall back to
+/// RSS-based ordering.
+fn draw_proc_breakdown(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    let total_mem = snap.mem.total_bytes.max(1);
+
+    // Column sets keyed off what the sampler could actually read this
+    // session — same pattern as the procs tab's NET / GPU columns.
+    let show_footprint = snap.procs.iter().any(|p| p.mem_footprint.is_some());
+    let show_smaps = snap.procs.iter().any(|p| p.mem_pss.is_some());
+
+    let block = panel(if show_footprint {
+        "Process memory breakdown (footprint = real pressure; rss double-counts shared)"
+    } else if show_smaps {
+        "Process memory breakdown (pss sums to real use; private frees on exit)"
+    } else {
+        "Process memory breakdown (by RSS)"
+    });
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Order by the most honest metric available per row, falling back
+    // to RSS so undetailed rows still rank sensibly.
     let mut sorted = snap.procs.clone();
-    sorted.sort_by(|a, b| b.mem_rss.cmp(&a.mem_rss));
+    sorted.sort_by_key(|p| std::cmp::Reverse(p.mem_footprint.or(p.mem_pss).unwrap_or(p.mem_rss)));
     let take = inner.height.saturating_sub(1) as usize;
 
-    let mut lines: Vec<Line> = vec![Line::from(vec![
-        Span::styled(
-            format!("{:>7} ", "PID"),
-            Style::default()
-                .fg(p::text_muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<10} ", "USER"),
-            Style::default()
-                .fg(p::text_muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:>10} ", "RSS"),
-            Style::default()
-                .fg(p::text_muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:>10} ", "VIRT"),
-            Style::default()
-                .fg(p::text_muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "COMMAND",
-            Style::default()
-                .fg(p::text_muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
+    let header_style = Style::default()
+        .fg(p::text_muted())
+        .add_modifier(Modifier::BOLD);
+    let mut header: Vec<Span> = vec![
+        Span::styled(format!("{:>7} ", "PID"), header_style),
+        Span::styled(format!("{:<10} ", "USER"), header_style),
+        Span::styled(format!("{:>6} ", "%MEM"), header_style),
+    ];
+    if show_footprint {
+        header.push(Span::styled(format!("{:>10} ", "FOOTPRNT"), header_style));
+    }
+    if show_smaps {
+        header.push(Span::styled(format!("{:>10} ", "PSS"), header_style));
+        header.push(Span::styled(format!("{:>10} ", "PRIVATE"), header_style));
+        header.push(Span::styled(format!("{:>10} ", "SHARED"), header_style));
+        header.push(Span::styled(format!("{:>10} ", "SWAP"), header_style));
+    }
+    let show_peak = snap.procs.iter().any(|p| p.mem_peak.is_some());
+    if show_peak {
+        header.push(Span::styled(format!("{:>10} ", "PEAK"), header_style));
+    }
+    header.push(Span::styled(format!("{:>10} ", "RSS"), header_style));
+    if !show_footprint && !show_smaps {
+        header.push(Span::styled(format!("{:>10} ", "VIRT"), header_style));
+    }
+    header.push(Span::styled("COMMAND", header_style));
+    let mut lines: Vec<Line> = vec![Line::from(header)];
+
+    // None → "—": the proc exists but detail wasn't readable (other
+    // user without sudo) or it ranked below the sampler's top-N cap.
+    let detail = |v: Option<u64>| match v {
+        Some(b) => human_bytes(b),
+        None => "—".into(),
+    };
+    let detail_fg = |v: Option<u64>| {
+        if v.is_some() {
+            p::brand()
+        } else {
+            p::text_muted()
+        }
+    };
+
     let rendered_rows = sorted.iter().take(take).count();
     for (i, proc_) in sorted.iter().take(take).enumerate() {
         let row_alpha = if app.user_config.graph_fade {
@@ -162,7 +214,7 @@ fn draw_top_rss(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         } else {
             1.0
         };
-        let spans = vec![
+        let mut spans = vec![
             Span::styled(
                 format!("{:>7} ", proc_.pid),
                 Style::default().fg(p::text_primary()),
@@ -172,15 +224,53 @@ fn draw_top_rss(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
                 Style::default().fg(p::text_muted()),
             ),
             Span::styled(
-                format!("{:>10} ", human_bytes(proc_.mem_rss)),
-                Style::default().fg(p::brand()),
+                format!("{:>5.1} ", mem_pct(proc_.mem_rss, total_mem)),
+                Style::default().fg(p::text_primary()),
             ),
-            Span::styled(
+        ];
+        if show_footprint {
+            spans.push(Span::styled(
+                format!("{:>10} ", detail(proc_.mem_footprint)),
+                Style::default().fg(detail_fg(proc_.mem_footprint)),
+            ));
+        }
+        if show_smaps {
+            for v in [
+                proc_.mem_pss,
+                proc_.mem_private,
+                proc_.mem_shared,
+                proc_.mem_swap,
+            ] {
+                spans.push(Span::styled(
+                    format!("{:>10} ", detail(v)),
+                    Style::default().fg(detail_fg(v)),
+                ));
+            }
+        }
+        if show_peak {
+            spans.push(Span::styled(
+                format!("{:>10} ", detail(proc_.mem_peak)),
+                Style::default().fg(detail_fg(proc_.mem_peak)),
+            ));
+        }
+        spans.push(Span::styled(
+            format!("{:>10} ", human_bytes(proc_.mem_rss)),
+            Style::default().fg(if show_footprint || show_smaps {
+                p::text_muted()
+            } else {
+                p::brand()
+            }),
+        ));
+        if !show_footprint && !show_smaps {
+            spans.push(Span::styled(
                 format!("{:>10} ", human_bytes(proc_.mem_virt)),
                 Style::default().fg(p::text_muted()),
-            ),
-            Span::styled(proc_.name.clone(), Style::default().fg(p::text_primary())),
-        ];
+            ));
+        }
+        spans.push(Span::styled(
+            proc_.name.clone(),
+            Style::default().fg(p::text_primary()),
+        ));
         let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
             spans
         } else {

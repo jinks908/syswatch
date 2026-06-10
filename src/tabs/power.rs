@@ -15,18 +15,110 @@ use crate::ui::{
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    // Per-process energy panel only when the platform bills energy
+    // (macOS Apple Silicon) — elsewhere the space goes to thermals.
+    let has_energy = snap.procs.iter().any(|p| p.power_w.is_some());
+    let constraints = if has_energy {
+        vec![
+            Constraint::Length(8),  // battery
+            Constraint::Length(7),  // power source / throttle / draw
+            Constraint::Length(10), // top energy consumers
+            Constraint::Min(0),     // thermal zones / fans
+        ]
+    } else {
+        vec![
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Min(0),
+        ]
+    };
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8), // battery
-            Constraint::Length(7), // power source / throttle / draw
-            Constraint::Min(0),    // thermal zones / fans
-        ])
+        .constraints(constraints)
         .split(area);
 
     draw_battery(f, v[0], &snap.power, app.graph_style);
     draw_status(f, v[1], &snap.power);
-    draw_thermal(f, v[2], &snap.power, app.graph_style, app.graph_opts());
+    if has_energy {
+        draw_energy(f, v[2], app, snap);
+        draw_thermal(f, v[3], &snap.power, app.graph_style, app.graph_opts());
+    } else {
+        draw_thermal(f, v[2], &snap.power, app.graph_style, app.graph_opts());
+    }
+}
+
+/// Top processes by estimated power — the per-process slice of the
+/// battery-drain question. Measured CPU-rail watts (IOReport) split
+/// by CPU share; `~` marks the attribution as an estimate.
+fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    let block = panel("Top energy consumers (~ measured CPU power × CPU share)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut ranked: Vec<_> = snap
+        .procs
+        .iter()
+        .filter(|p| p.power_w.map(|w| w > 0.005).unwrap_or(false))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.power_w
+            .partial_cmp(&a.power_w)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if ranked.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "No measurable per-process draw this window.",
+                Style::default().fg(p::text_muted()),
+            )]))
+            .style(Style::default().bg(p::bg())),
+            inner,
+        );
+        return;
+    }
+
+    let take = inner.height as usize;
+    let max_w = ranked
+        .first()
+        .and_then(|p| p.power_w)
+        .unwrap_or(1.0)
+        .max(0.001);
+    let rendered_rows = ranked.iter().take(take).count();
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, proc_) in ranked.iter().take(take).enumerate() {
+        let w = proc_.power_w.unwrap_or(0.0);
+        let row_alpha = if app.user_config.graph_fade {
+            crate::ui::graph::row_fade_alpha(i, rendered_rows)
+        } else {
+            1.0
+        };
+        let color = if w >= 10.0 {
+            p::status_warn()
+        } else {
+            p::brand()
+        };
+        let bar = block_bar_styled((w / max_w).clamp(0.0, 1.0), 24, color, app.graph_style);
+        let mut spans = vec![Span::styled(
+            format!("{:>8} W  ", format!("~{:.2}", w)),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(bar.spans);
+        spans.push(Span::styled(
+            format!("  {} (pid {})", proc_.name, proc_.pid),
+            Style::default().fg(p::text_primary()),
+        ));
+        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
+            spans
+        } else {
+            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
+        };
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
+        inner,
+    );
 }
 
 fn draw_battery(f: &mut Frame, area: Rect, pwr: &PowerTick, style: GraphStyle) {

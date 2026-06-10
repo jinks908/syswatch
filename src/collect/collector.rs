@@ -10,6 +10,7 @@ use super::model::*;
 use super::power::PowerCollector;
 use super::proc_bandwidth::ProcessBandwidthCollector;
 use super::proc_gpu::ProcGpuCollector;
+use super::proc_memory::ProcMemCollector;
 use super::services::ServicesCollector;
 
 /// Collector keeps long-lived sysinfo handles + previous-tick counters so we can
@@ -31,11 +32,12 @@ pub struct Collector {
     last_disk_read: u64,
     last_disk_write: u64,
     last_iface: HashMap<String, (u64, u64)>, // name -> (rx, tx)
-    last_proc_io: HashMap<u32, u64>,         // pid -> cumulative read+written bytes
+    last_proc_io: HashMap<u32, (u64, u64)>,  // pid -> cumulative (read, written) bytes
     gpu: GpuDiscovery,
     power: PowerCollector,
     proc_bw: ProcessBandwidthCollector,
     proc_gpu: ProcGpuCollector,
+    proc_mem: ProcMemCollector,
     services: ServicesCollector,
     host: HostInfo,
     /// Shared IOReport + SMC sampler. Both `gpu` and `power` consume
@@ -94,6 +96,7 @@ impl Collector {
             power: PowerCollector::new(),
             proc_bw: ProcessBandwidthCollector::new(),
             proc_gpu: ProcGpuCollector::new(),
+            proc_mem: ProcMemCollector::new(),
             services: ServicesCollector::new(),
             host,
             #[cfg(target_os = "macos")]
@@ -142,10 +145,11 @@ impl Collector {
         let (disks, disk_io) = self.collect_disks(dt_secs);
         let net = self.collect_net(dt_secs);
         let mut procs = self.collect_procs(dt_secs);
-        // Per-PID bandwidth attribution. Cached at REFRESH inside the
-        // collector so we only pay the lsof/ss subprocess cost a few
-        // times a second even at 1Hz tick rates.
-        let bw = self.proc_bw.sample(&net);
+        // Per-PID bandwidth — measured (nettop) on macOS, attributed
+        // elsewhere. Cached at REFRESH inside the collector so we only
+        // pay the subprocess cost a few times a second even at 1Hz
+        // tick rates.
+        let (bw, net_rates_estimated) = self.proc_bw.sample(&net);
         if !bw.is_empty() {
             for p in procs.iter_mut() {
                 if let Some((rx, tx)) = bw.get(&p.pid) {
@@ -165,6 +169,26 @@ impl Collector {
                 }
             }
         }
+        // Per-PID memory detail (smaps_rollup / phys_footprint) for the
+        // top procs by RSS. Cached inside the collector on its own
+        // refresh budget like proc_bw / proc_gpu.
+        let pmem = self.proc_mem.sample(&procs);
+        if !pmem.is_empty() {
+            for p in procs.iter_mut() {
+                if let Some(m) = pmem.get(&p.pid) {
+                    p.mem_footprint = m.footprint;
+                    p.mem_pss = m.pss;
+                    p.mem_private = m.private;
+                    p.mem_shared = m.shared;
+                    p.mem_swap = m.swap;
+                    // Linux fills mem_peak from /proc/PID/status for
+                    // every proc; only macOS supplies it here.
+                    if m.peak.is_some() {
+                        p.mem_peak = m.peak;
+                    }
+                }
+            }
+        }
         // Sample IOReport + SMC once per cycle on macOS; both `gpu` and
         // `power` read from the cached MacosTick so we don't duplicate
         // subscriptions or controller queries.
@@ -172,6 +196,24 @@ impl Collector {
         let macos_tick = self.macos.as_mut().and_then(|s| s.tick());
         #[cfg(target_os = "macos")]
         let macos_tick_ref = macos_tick.as_ref();
+
+        // Estimated per-process power: the measured CPU-rail wattage
+        // (IOReport) apportioned by each process's share of CPU time.
+        // An estimate — rendered with `~` — but anchored to a real
+        // measured total. Direct per-process energy is not readable
+        // without sudo on either platform (ri_billed_energy only moves
+        // at billing boundaries; RAPL is root-only since Platypus).
+        #[cfg(target_os = "macos")]
+        if let Some(cpu_w) = macos_tick_ref.and_then(|t| t.cpu_power_w) {
+            let total_pct: f32 = procs.iter().map(|p| p.cpu_pct.max(0.0)).sum();
+            if total_pct > 0.0 {
+                for p in procs.iter_mut() {
+                    if p.cpu_pct > 0.0 {
+                        p.power_w = Some(cpu_w * p.cpu_pct / total_pct);
+                    }
+                }
+            }
+        }
 
         #[cfg(target_os = "macos")]
         let gpus = self.gpu.refresh(macos_tick_ref);
@@ -200,6 +242,8 @@ impl Collector {
             gpus,
             power,
             services,
+            net_rates_estimated,
+            pressure: collect_pressure(),
         }
     }
 
@@ -252,11 +296,22 @@ impl Collector {
             });
         }
 
-        // Prefer netwatch-sdk's /proc/diskstats reader for aggregate IO (Linux).
-        // On macOS the SDK returns None — we fall back to summing per-process IO,
-        // which is less precise but the only portable signal sysinfo gives us.
+        // Aggregate IO sources in preference order: netwatch-sdk's
+        // /proc/diskstats reader (Linux), IOKit block-storage stats
+        // (macOS — device-level truth incl. kernel/page-cache IO),
+        // then summing per-process counters as the last resort.
         let (read_total, write_total) = netwatch_sdk::collectors::disk::collect_disk_io()
             .map(|io| (io.read_bytes, io.write_bytes))
+            .or_else(|| {
+                #[cfg(target_os = "macos")]
+                {
+                    super::disk_macos::collect_block_io()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            })
             .unwrap_or_else(|| {
                 let mut r = 0u64;
                 let mut w = 0u64;
@@ -374,19 +429,24 @@ impl Collector {
     }
 
     fn collect_procs(&mut self, dt: f64) -> Vec<ProcTick> {
-        let mut next_io: HashMap<u32, u64> = HashMap::with_capacity(self.sys.processes().len());
+        let mut next_io: HashMap<u32, (u64, u64)> =
+            HashMap::with_capacity(self.sys.processes().len());
         let mut out: Vec<ProcTick> = Vec::with_capacity(self.sys.processes().len());
 
         for (pid, p) in self.sys.processes() {
+            // sysinfo lists Linux tasks (threads) as separate processes.
+            // A thread shares its group's memory map, so keeping them
+            // repeats the same RSS/PSS once per thread — the main row
+            // already carries whole-process CPU and memory.
+            if p.thread_kind().is_some() {
+                continue;
+            }
             let pid_u = pid.as_u32();
             let io = p.disk_usage();
-            let cumulative = io.total_read_bytes.saturating_add(io.total_written_bytes);
+            let cumulative = (io.total_read_bytes, io.total_written_bytes);
             let prev = self.last_proc_io.get(&pid_u).copied().unwrap_or(cumulative);
-            let io_rate = if prev == cumulative {
-                0.0
-            } else {
-                (cumulative.saturating_sub(prev)) as f64 / dt
-            };
+            let io_read_rate = (cumulative.0.saturating_sub(prev.0)) as f64 / dt;
+            let io_write_rate = (cumulative.1.saturating_sub(prev.1)) as f64 / dt;
             next_io.insert(pid_u, cumulative);
 
             let user = p
@@ -394,6 +454,7 @@ impl Collector {
                 .and_then(|uid| self.users.get_user_by_id(uid))
                 .map(|u| u.name().to_string())
                 .unwrap_or_else(|| "?".into());
+            let (threads, mem_peak) = proc_threads_and_peak(pid_u);
             out.push(ProcTick {
                 pid: pid_u,
                 ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
@@ -408,18 +469,27 @@ impl Collector {
                 cpu_pct: p.cpu_usage(),
                 mem_rss: p.memory(),
                 mem_virt: p.virtual_memory(),
-                threads: 1, // sysinfo doesn't expose thread count portably
+                threads,
                 state: status_to_char(p.status()),
                 start_time: Some(
                     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(p.start_time()),
                 ),
-                io_rate,
+                io_read_rate,
+                io_write_rate,
                 // Filled in by Collector::sample after collect_procs
-                // returns — proc_bandwidth + proc_gpu lookups are per-tick.
+                // returns — proc_bandwidth + proc_gpu + proc_mem lookups
+                // are per-tick.
                 net_rx_rate: None,
                 net_tx_rate: None,
                 gpu_pct: None,
                 gpu_mem_bytes: None,
+                mem_footprint: None,
+                mem_pss: None,
+                mem_private: None,
+                mem_shared: None,
+                mem_swap: None,
+                mem_peak,
+                power_w: None,
             });
         }
         self.last_proc_io = next_io;
@@ -431,6 +501,115 @@ impl Collector {
         });
         out
     }
+}
+
+/// Real thread count plus (on Linux) lifetime peak RSS, from one read
+/// of `/proc/PID/status`. macOS peak comes from rusage in proc_memory;
+/// thread counts come from proc_pidinfo here.
+#[cfg(target_os = "linux")]
+fn proc_threads_and_peak(pid: u32) -> (Option<u32>, Option<u64>) {
+    let Ok(text) = std::fs::read_to_string(format!("/proc/{}/status", pid)) else {
+        return (None, None);
+    };
+    parse_status_threads_peak(&text)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_status_threads_peak(text: &str) -> (Option<u32>, Option<u64>) {
+    let mut threads = None;
+    let mut peak = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Threads:") {
+            threads = rest.trim().parse::<u32>().ok();
+        } else if let Some(rest) = line.strip_prefix("VmHWM:") {
+            // `VmHWM:    2412 kB`
+            peak = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .map(|kb| kb.saturating_mul(1024));
+        }
+        if threads.is_some() && peak.is_some() {
+            break;
+        }
+    }
+    (threads, peak)
+}
+
+#[cfg(target_os = "macos")]
+fn proc_threads_and_peak(pid: u32) -> (Option<u32>, Option<u64>) {
+    // SAFETY: proc_pidinfo writes at most size_of::<proc_taskinfo>()
+    // bytes; we check the returned size before reading. Fails with
+    // EPERM for other users' procs without sudo → None.
+    unsafe {
+        let mut ti: libc::proc_taskinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let ret = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut ti as *mut libc::proc_taskinfo as *mut libc::c_void,
+            size,
+        );
+        if ret < size {
+            return (None, None);
+        }
+        (Some(ti.pti_threadnum.max(0) as u32), None)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn proc_threads_and_peak(_pid: u32) -> (Option<u32>, Option<u64>) {
+    (None, None)
+}
+
+/// PSI from /proc/pressure (Linux ≥4.20 with CONFIG_PSI). None when
+/// the files are absent or unreadable.
+#[cfg(target_os = "linux")]
+fn collect_pressure() -> Option<PressureTick> {
+    let read = |res: &str| std::fs::read_to_string(format!("/proc/pressure/{}", res)).ok();
+    let cpu = parse_psi_avg10(&read("cpu")?);
+    let mem = parse_psi_avg10(&read("memory")?);
+    let io = parse_psi_avg10(&read("io")?);
+    Some(PressureTick {
+        cpu_some: cpu.0,
+        mem_some: mem.0,
+        mem_full: mem.1,
+        io_some: io.0,
+        io_full: io.1,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_pressure() -> Option<PressureTick> {
+    None
+}
+
+/// (some_avg10, full_avg10) out of a /proc/pressure file:
+/// ```text
+/// some avg10=0.12 avg60=0.05 avg300=0.01 total=12345
+/// full avg10=0.03 avg60=0.01 avg300=0.00 total=6789
+/// ```
+/// The cpu file may omit the `full` line on older kernels → 0.0.
+#[cfg(any(target_os = "linux", test))]
+fn parse_psi_avg10(text: &str) -> (f32, f32) {
+    let mut some = 0.0;
+    let mut full = 0.0;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let kind = parts.next().unwrap_or("");
+        let avg10 = parts
+            .next()
+            .and_then(|t| t.strip_prefix("avg10="))
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        match kind {
+            "some" => some = avg10,
+            "full" => full = avg10,
+            _ => {}
+        }
+    }
+    (some, full)
 }
 
 fn status_to_char(s: sysinfo::ProcessStatus) -> char {
@@ -480,4 +659,71 @@ fn interface_up_flags() -> HashMap<String, bool> {
         libc::freeifaddrs(ifap);
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn psi_parses_some_and_full() {
+        let text = "\
+some avg10=1.25 avg60=0.50 avg300=0.10 total=12345
+full avg10=0.40 avg60=0.20 avg300=0.05 total=6789
+";
+        assert_eq!(parse_psi_avg10(text), (1.25, 0.40));
+    }
+
+    #[test]
+    fn psi_cpu_file_without_full_line() {
+        // Older kernels omit `full` for cpu — must default to 0, not error.
+        let text = "some avg10=3.00 avg60=1.00 avg300=0.20 total=999\n";
+        assert_eq!(parse_psi_avg10(text), (3.00, 0.0));
+    }
+
+    #[test]
+    fn psi_garbled_yields_zeros() {
+        assert_eq!(parse_psi_avg10("nonsense\n"), (0.0, 0.0));
+        assert_eq!(parse_psi_avg10(""), (0.0, 0.0));
+    }
+
+    #[test]
+    fn status_parses_threads_and_peak() {
+        let text = "\
+Name:\tsyswatch
+Umask:\t0002
+State:\tS (sleeping)
+VmPeak:\t  920000 kB
+VmHWM:\t    2412 kB
+VmRSS:\t    2400 kB
+Threads:\t17
+";
+        let (threads, peak) = parse_status_threads_peak(text);
+        assert_eq!(threads, Some(17));
+        assert_eq!(peak, Some(2412 * 1024));
+    }
+
+    #[test]
+    fn status_missing_fields_yield_none() {
+        let (threads, peak) = parse_status_threads_peak("Name:\tx\n");
+        assert_eq!(threads, None);
+        assert_eq!(peak, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_status_for_own_pid() {
+        let (threads, peak) = proc_threads_and_peak(std::process::id());
+        assert!(threads.unwrap_or(0) >= 1);
+        assert!(peak.unwrap_or(0) > 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_taskinfo_for_own_pid() {
+        let (threads, peak) = proc_threads_and_peak(std::process::id());
+        assert!(threads.unwrap_or(0) >= 1);
+        // Peak comes from rusage in proc_memory on macOS, not here.
+        assert_eq!(peak, None);
+    }
 }

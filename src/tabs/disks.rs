@@ -145,7 +145,7 @@ fn draw_throughput(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         app.graph_opts(),
     );
 
-    let counters = vec![
+    let mut counters = vec![
         Line::from(vec![
             Span::styled("read   ", Style::default().fg(p::text_muted())),
             Span::styled(
@@ -181,6 +181,23 @@ fn draw_throughput(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             ),
         ]),
     ];
+    // PSI: time tasks sat blocked on IO — catches a saturated disk
+    // even when throughput looks modest (small random IO).
+    if let Some(psi) = &snap.pressure {
+        counters.push(Line::from(vec![
+            Span::styled("stall  ", Style::default().fg(p::text_muted())),
+            Span::styled(
+                format!("{:.1}% some / {:.1}% full", psi.io_some, psi.io_full),
+                Style::default().fg(if psi.io_full >= 10.0 {
+                    p::status_error()
+                } else if psi.io_some >= 25.0 {
+                    p::status_warn()
+                } else {
+                    p::text_primary()
+                }),
+            ),
+        ]));
+    }
     f.render_widget(
         Paragraph::new(counters).style(Style::default().bg(p::bg())),
         cols[1],

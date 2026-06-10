@@ -70,6 +70,8 @@ mod tests {
             gpus: Vec::new(),
             power: Default::default(),
             services: Vec::new(),
+            net_rates_estimated: true,
+            pressure: None,
         };
         let body = serde_json::to_string_pretty(&snap).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&body).expect("re-parse");

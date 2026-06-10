@@ -11,7 +11,7 @@ use crate::insights::Severity;
 use crate::ui::{
     graph::{self, GraphStyle},
     palette as p,
-    widgets::{block_bar_styled, human_bytes, human_rate, panel},
+    widgets::{block_bar_styled, human_rate, mem_pct, panel},
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -252,7 +252,7 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         Cell::from("PID"),
         Cell::from("USER"),
         Cell::from("%CPU"),
-        Cell::from("RSS"),
+        Cell::from("%MEM"),
         Cell::from("COMMAND"),
     ])
     .style(
@@ -291,7 +291,7 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             Cell::from(p_.user.clone()).style(muted_fg),
             Cell::from(format!("{:.1}", p_.cpu_pct))
                 .style(fade(Style::default().fg(kpi_color(p_.cpu_pct, 30.0, 70.0)))),
-            Cell::from(human_bytes(p_.mem_rss)).style(plain_fg),
+            Cell::from(format!("{:.1}", mem_pct(p_.mem_rss, snap.mem.total_bytes))).style(plain_fg),
             Cell::from(p_.name.clone()).style(plain_fg),
         ])
     });
@@ -300,7 +300,7 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         Constraint::Length(7),
         Constraint::Length(10),
         Constraint::Length(6),
-        Constraint::Length(10),
+        Constraint::Length(6),
         Constraint::Min(0),
     ];
     // Cells without an explicit fg inherit this style's fg. Without setting

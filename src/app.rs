@@ -64,6 +64,13 @@ pub struct History {
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
     pub proc_cpu_ewma: HashMap<u32, f32>,
+    /// Per-pid billed-power EWMA (macOS) — smooths the 2s sampler so
+    /// the energy-hog insight doesn't fire on one busy window.
+    pub proc_power_ewma: HashMap<u32, f32>,
+    /// Per-pid leak tracking over detailed memory (footprint on macOS,
+    /// private on Linux): pid → (baseline, ticks observed, latest).
+    /// Only procs the memory sampler covers (top-N by RSS) are tracked.
+    pub proc_mem_track: HashMap<u32, (u64, u32, u64)>,
     /// Full session: every snapshot pushed in order. Bounded — sized to
     /// match the metric rings so scrubbing stays in sync. The Timeline tab
     /// drives scrubbing; other tabs read App::displayed_snap().
@@ -85,6 +92,8 @@ impl History {
             gpu_util_by_name: HashMap::new(),
             gpu_vram_by_name: HashMap::new(),
             proc_cpu_ewma: HashMap::new(),
+            proc_power_ewma: HashMap::new(),
+            proc_mem_track: HashMap::new(),
             session: Ring::new(cap),
             cap,
         }
@@ -160,6 +169,35 @@ impl History {
             next.insert(proc_.pid, ewma);
         }
         self.proc_cpu_ewma = next;
+
+        // Billed-power EWMA, same alpha and same prune-to-live rule.
+        let mut next_power: HashMap<u32, f32> = HashMap::new();
+        for proc_ in &snap.procs {
+            if let Some(w) = proc_.power_w {
+                let prev = self.proc_power_ewma.get(&proc_.pid).copied().unwrap_or(w);
+                next_power.insert(proc_.pid, 0.7 * prev + 0.3 * w);
+            }
+        }
+        self.proc_power_ewma = next_power;
+
+        // Leak tracking over the honest per-proc metric (footprint /
+        // private). Baseline is the first detailed sighting; a proc
+        // that drops out of the sampler's top-N keeps its entry until
+        // it exits, so a slow leaker can't hide by being briefly idle.
+        let live: std::collections::HashSet<u32> = snap.procs.iter().map(|p| p.pid).collect();
+        self.proc_mem_track.retain(|pid, _| live.contains(pid));
+        for proc_ in &snap.procs {
+            let Some(metric) = proc_.mem_footprint.or(proc_.mem_private) else {
+                continue;
+            };
+            self.proc_mem_track
+                .entry(proc_.pid)
+                .and_modify(|(_base, ticks, latest)| {
+                    *ticks += 1;
+                    *latest = metric;
+                })
+                .or_insert((metric, 1, metric));
+        }
     }
 }
 
@@ -249,6 +287,8 @@ impl TabId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcSort {
     Cpu,
+    /// Labelled "mem" — orders by mem_rss, which is the same order as
+    /// the %MEM column (total RAM is constant across rows).
     Rss,
     Io,
     Start,
@@ -264,7 +304,7 @@ impl ProcSort {
     pub fn label(&self) -> &'static str {
         match self {
             ProcSort::Cpu => "cpu",
-            ProcSort::Rss => "rss",
+            ProcSort::Rss => "mem",
             ProcSort::Io => "io",
             ProcSort::Start => "start",
             ProcSort::Name => "name",

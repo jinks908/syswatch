@@ -6,7 +6,7 @@
   <p align="center">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/version-v0.7.0-green" alt="Version">
+    <img src="https://img.shields.io/badge/version-v0.7.2-green" alt="Version">
   </p>
 </p>
 
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <strong>New in v0.7.0:</strong> the GPU tab — per-device utilization &amp; VRAM as ~120s time-series, with the renderer/tiler engine split on Apple Silicon, temp and power. No sudo.
+  <strong>New in v0.7.2:</strong> honest per-process accounting — %MEM utilisation columns, a deep Memory-tab breakdown (PSS / private / swap on Linux, footprint on macOS), measured per-process network on macOS via nettop (estimates marked <code>~</code>), Linux PSI pressure readouts, peak memory, real thread counts, read/write IO split, IOKit disk IO, and per-process energy attribution on Apple Silicon. No sudo.
 </p>
 
 ---

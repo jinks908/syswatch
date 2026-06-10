@@ -24,9 +24,13 @@ use crate::collect::Snapshot;
 /// Magic bytes at the start of every .swr file. ASCII so `file(1)`
 /// can identify them later if we add a magic database entry.
 pub const MAGIC: &[u8; 4] = b"SWR\0";
-/// Bumped on incompatible format changes. Replay refuses higher
-/// versions than it knows; lower versions stay readable indefinitely.
-pub const FORMAT_VERSION: u16 = 1;
+/// Bumped on incompatible format changes. postcard isn't
+/// self-describing, so any change to `Snapshot`'s shape (v2: per-proc
+/// memory detail fields on `ProcTick` + `net_rates_estimated`) is
+/// incompatible both ways —
+/// replay refuses any version other than its own with a clear error
+/// rather than silently returning zero snapshots.
+pub const FORMAT_VERSION: u16 = 2;
 
 /// Local data dir for session files.
 pub fn dir() -> Option<PathBuf> {
@@ -121,6 +125,14 @@ pub fn read(path: &Path) -> Result<Vec<Snapshot>> {
             FORMAT_VERSION
         ));
     }
+    if version < FORMAT_VERSION {
+        return Err(anyhow!(
+            "recording format v{} predates this binary (needs v{}); \
+             re-record with the current syswatch",
+            version,
+            FORMAT_VERSION
+        ));
+    }
 
     let mut out = Vec::new();
     loop {
@@ -201,6 +213,20 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("newer than this binary"));
+    }
+
+    #[test]
+    fn rejects_older_format_version() {
+        // v1 snapshots predate the per-proc memory detail fields and
+        // can't be decoded by this binary — better a clear error than
+        // an empty replay.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.swr");
+        let mut bytes = Vec::from(*MAGIC);
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let err = read(&path).unwrap_err();
+        assert!(err.to_string().contains("predates this binary"));
     }
 
     #[test]

@@ -147,6 +147,13 @@ pub fn human_rate(b_per_s: f64) -> String {
     format!("{}/s", human_bytes(b_per_s as u64))
 }
 
+/// Memory utilisation as percent of total RAM — the %MEM the process
+/// tables render. Total is clamped to 1 so a zeroed snapshot (first
+/// tick, malformed recording) renders 0.0 rather than NaN.
+pub fn mem_pct(bytes: u64, total_bytes: u64) -> f32 {
+    bytes as f32 / total_bytes.max(1) as f32 * 100.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -467,7 +467,11 @@ mod tests {
             dir.path(),
             "hwmon0",
             "nct6797",
-            &[(1, None, "-274000"), (2, None, "999000"), (3, None, "61000")],
+            &[
+                (1, None, "-274000"),
+                (2, None, "999000"),
+                (3, None, "61000"),
+            ],
         );
         let zones = collect_hwmon_temps(dir.path());
         assert_eq!(zones.len(), 1);
@@ -498,7 +502,9 @@ mod tests {
         );
         let zones = collect_hwmon_temps(dir.path());
         assert_eq!(zones.len(), 4);
-        assert!(zones.iter().any(|z| z.name == "coretemp Core 32" && z.temp_c == 44.0));
+        assert!(zones
+            .iter()
+            .any(|z| z.name == "coretemp Core 32" && z.temp_c == 44.0));
         assert!(zones.iter().any(|z| z.name == "coretemp Core 33"));
         // Sorted by index → Package (temp1) first.
         assert_eq!(zones[0].name, "coretemp Package id 0");

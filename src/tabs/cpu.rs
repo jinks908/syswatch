@@ -53,7 +53,7 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     );
 
     // Counters panel.
-    let counters = vec![
+    let mut counters = vec![
         kv("usage", format!("{:>5.1}%", snap.cpu.usage_pct), p::brand()),
         kv(
             "load",
@@ -70,6 +70,20 @@ fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         ),
         kv("model", snap.host.cpu_model.clone(), p::text_muted()),
     ];
+    // PSI: % of time ≥1 runnable task waited for a CPU — distinguishes
+    // "busy but keeping up" from actual contention, which load average
+    // alone can't.
+    if let Some(psi) = &snap.pressure {
+        counters.push(kv(
+            "stall",
+            format!("{:.1}% some (psi avg10)", psi.cpu_some),
+            if psi.cpu_some >= 25.0 {
+                p::status_warn()
+            } else {
+                p::text_primary()
+            },
+        ));
+    }
     f.render_widget(
         Paragraph::new(counters).style(Style::default().bg(p::bg())),
         cols[1],

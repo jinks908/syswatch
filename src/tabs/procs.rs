@@ -10,7 +10,7 @@ use crate::app::{App, ProcSort, Snapshot};
 use crate::collect::ProcTick;
 use crate::ui::{
     palette as p,
-    widgets::{human_bytes, human_rate, panel},
+    widgets::{human_bytes, human_rate, mem_pct, panel},
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -19,7 +19,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .constraints([
             Constraint::Length(1), // sort strip / filter input
             Constraint::Min(0),    // process table
-            Constraint::Length(7), // drill-in
+            Constraint::Length(9), // drill-in
         ])
         .split(area);
 
@@ -29,8 +29,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         app.proc_sort,
         app.proc_filter_active.as_deref(),
     );
-    draw_table(f, v[1], app, &view);
-    draw_drill_in(f, v[2], &view, app.proc_sel);
+    let total_mem = snap.mem.total_bytes.max(1);
+    draw_table(f, v[1], app, &view, total_mem, snap.net_rates_estimated);
+    draw_drill_in(f, v[2], &view, app.proc_sel, total_mem);
 }
 
 /// Filter then sort the proc list. `filter` is a case-insensitive
@@ -67,8 +68,9 @@ fn sort_in_place(out: &mut [ProcTick], key: ProcSort) {
         }),
         ProcSort::Rss => out.sort_by(|a, b| b.mem_rss.cmp(&a.mem_rss)),
         ProcSort::Io => out.sort_by(|a, b| {
-            b.io_rate
-                .partial_cmp(&a.io_rate)
+            let total = |p: &ProcTick| p.io_read_rate + p.io_write_rate;
+            total(b)
+                .partial_cmp(&total(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         }),
         ProcSort::Start => out.sort_by(|a, b| b.start_time.cmp(&a.start_time)),
@@ -160,7 +162,14 @@ fn draw_sort_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     );
 }
 
-fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
+fn draw_table(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    procs: &[ProcTick],
+    total_mem: u64,
+    net_estimated: bool,
+) {
     let block = panel("PROCESSES");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -176,7 +185,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
         Span::styled(format!("{:>7} ", "PPID"), header_style()),
         Span::styled(format!("{:<14} ", "USER"), header_style()),
         Span::styled(format!("{:>6} ", "%CPU"), header_style()),
-        Span::styled(format!("{:>9} ", "RSS"), header_style()),
+        Span::styled(format!("{:>6} ", "%MEM"), header_style()),
     ];
     // VIRT only when neither extras are shown — keeps the row from
     // sprawling past 120 cols when both NET and GPU are populated.
@@ -184,10 +193,18 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
         header_spans.push(Span::styled(format!("{:>9} ", "VIRT"), header_style()));
     }
     header_spans.push(Span::styled(format!("{:<5} ", "STATE"), header_style()));
-    header_spans.push(Span::styled(format!("{:>11} ", "IO/s"), header_style()));
+    header_spans.push(Span::styled(format!("{:>10} ", "R/s"), header_style()));
+    header_spans.push(Span::styled(format!("{:>10} ", "W/s"), header_style()));
     if show_net {
-        header_spans.push(Span::styled(format!("{:>10} ", "NET ↓/s"), header_style()));
-        header_spans.push(Span::styled(format!("{:>10} ", "NET ↑/s"), header_style()));
+        // `~` marks the connection-count estimate; measured rates
+        // (nettop on macOS) render unmarked.
+        let (rx_h, tx_h) = if net_estimated {
+            ("~NET ↓/s", "~NET ↑/s")
+        } else {
+            ("NET ↓/s", "NET ↑/s")
+        };
+        header_spans.push(Span::styled(format!("{:>10} ", rx_h), header_style()));
+        header_spans.push(Span::styled(format!("{:>10} ", tx_h), header_style()));
     }
     if show_gpu {
         header_spans.push(Span::styled(format!("{:>5} ", "%GPU"), header_style()));
@@ -251,7 +268,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
                 Style::default().fg(cpu_color).bg(row_bg),
             ),
             Span::styled(
-                format!("{:>9} ", human_bytes(proc_.mem_rss)),
+                format!("{:>5.1} ", mem_pct(proc_.mem_rss, total_mem)),
                 Style::default().fg(p::text_primary()).bg(row_bg),
             ),
         ];
@@ -269,16 +286,18 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
                 .bg(row_bg)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            format!("{:>11} ", human_rate(proc_.io_rate)),
-            Style::default()
-                .fg(if proc_.io_rate > 0.0 {
-                    p::brand()
-                } else {
-                    p::text_muted()
-                })
-                .bg(row_bg),
-        ));
+        for rate in [proc_.io_read_rate, proc_.io_write_rate] {
+            spans.push(Span::styled(
+                format!("{:>10} ", human_rate(rate)),
+                Style::default()
+                    .fg(if rate > 0.0 {
+                        p::brand()
+                    } else {
+                        p::text_muted()
+                    })
+                    .bg(row_bg),
+            ));
+        }
         if show_net {
             let rx = proc_.net_rx_rate.unwrap_or(0.0);
             let tx = proc_.net_tx_rate.unwrap_or(0.0);
@@ -356,7 +375,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, procs: &[ProcTick]) {
     );
 }
 
-fn draw_drill_in(f: &mut Frame, area: Rect, procs: &[ProcTick], sel: usize) {
+fn draw_drill_in(f: &mut Frame, area: Rect, procs: &[ProcTick], sel: usize, total_mem: u64) {
     let Some(p_) = procs.get(sel.min(procs.len().saturating_sub(1))) else {
         let block = panel("DRILL-IN");
         f.render_widget(block, area);
@@ -383,25 +402,58 @@ fn draw_drill_in(f: &mut Frame, area: Rect, procs: &[ProcTick], sel: usize) {
         })
         .unwrap_or_else(|| "?".into());
 
+    let user_line = format!(
+        "{}   ppid {}{}",
+        p_.user,
+        p_.ppid,
+        p_.threads
+            .map(|t| format!("   threads {}", t))
+            .unwrap_or_default()
+    );
+    let mem_line = format!(
+        "{:.1}%  ({} rss / {} virt){}",
+        mem_pct(p_.mem_rss, total_mem),
+        human_bytes(p_.mem_rss),
+        human_bytes(p_.mem_virt),
+        p_.mem_peak
+            .map(|b| format!("   peak {}", human_bytes(b)))
+            .unwrap_or_default()
+    );
+    let cpu_line = format!(
+        "{:.1}%{}",
+        p_.cpu_pct,
+        p_.power_w
+            .map(|w| format!("   ~{:.2} W", w))
+            .unwrap_or_default()
+    );
+    let io_total = p_.io_read_rate + p_.io_write_rate;
+    let net_line = match (p_.net_rx_rate, p_.net_tx_rate) {
+        (None, None) => "—".to_string(),
+        (rx, tx) => format!(
+            "↓ {} / ↑ {}",
+            human_rate(rx.unwrap_or(0.0)),
+            human_rate(tx.unwrap_or(0.0))
+        ),
+    };
     let lines = vec![
         kv("cmd", cmd, p::text_primary()),
-        kv("ppid", p_.ppid.to_string(), p::text_primary()),
-        kv("user", p_.user.clone(), p::text_primary()),
+        kv("user", user_line, p::text_primary()),
+        kv("mem", mem_line, p::text_primary()),
+        kv("cpu", cpu_line, p::text_primary()),
         kv(
-            "rss / virt",
-            format!("{} / {}", human_bytes(p_.mem_rss), human_bytes(p_.mem_virt)),
-            p::text_primary(),
-        ),
-        kv("cpu", format!("{:.1}%", p_.cpu_pct), p::text_primary()),
-        kv(
-            "io rate",
-            human_rate(p_.io_rate),
-            if p_.io_rate > 0.0 {
+            "io r/w",
+            format!(
+                "read {} / write {}",
+                human_rate(p_.io_read_rate),
+                human_rate(p_.io_write_rate)
+            ),
+            if io_total > 0.0 {
                 p::brand()
             } else {
                 p::text_muted()
             },
         ),
+        kv("net", net_line, p::text_primary()),
         kv("started", started, p::text_muted()),
     ];
     f.render_widget(
@@ -424,9 +476,9 @@ fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
 }
 
 fn fill(width: usize, used: &str, show_net: bool, show_gpu: bool) -> String {
-    // Fixed: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + RSS 9+1
-    //        STATE 5+1 + IO/s 11+1
-    let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 9 + 1 + 5 + 1 + 11 + 1;
+    // Fixed: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + %MEM 5+1
+    //        STATE 5+1 + R/s 10+1 + W/s 10+1
+    let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 5 + 1 + 5 + 1 + 10 + 1 + 10 + 1;
     let virt_w = if !show_net && !show_gpu { 9 + 1 } else { 0 };
     let net_w = if show_net { 10 + 1 + 10 + 1 } else { 0 };
     let gpu_w = if show_gpu { 5 + 1 + 9 + 1 } else { 0 };
@@ -459,14 +511,11 @@ mod tests {
             cpu_pct: cpu,
             mem_rss: rss,
             mem_virt: 0,
-            threads: 1,
+            threads: None,
             state: 'S',
             start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
-            io_rate: io,
-            net_rx_rate: None,
-            net_tx_rate: None,
-            gpu_pct: None,
-            gpu_mem_bytes: None,
+            io_read_rate: io,
+            ..ProcTick::default()
         }
     }
 
