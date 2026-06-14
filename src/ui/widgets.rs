@@ -94,8 +94,17 @@ pub fn sparkline_styled(
     color: ratatui::style::Color,
     style: GraphStyle,
 ) -> Line<'static> {
-    let s: String = samples.iter().map(|v| sparkline_glyph(*v, style)).collect();
-    Line::from(vec![Span::styled(s, Style::default().fg(color))])
+    Line::from(vec![Span::styled(
+        sparkline_string(samples, style),
+        Style::default().fg(color),
+    )])
+}
+
+/// Glyph string for `samples` (each 0..1), one cell per sample. Callers that
+/// need to composite the sparkline into a wider styled row (e.g. the Procs
+/// per-process CPU trend column) use this directly.
+pub fn sparkline_string(samples: &[f32], style: GraphStyle) -> String {
+    samples.iter().map(|v| sparkline_glyph(*v, style)).collect()
 }
 
 fn sparkline_glyph(v: f32, style: GraphStyle) -> char {

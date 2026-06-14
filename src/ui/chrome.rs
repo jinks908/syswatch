@@ -10,7 +10,27 @@ use crate::app::{LiveState, Snapshot, TabId, ALL_TABS};
 use crate::ui::graph::GraphStyle;
 use crate::ui::palette as p;
 
-pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState, recording: bool) {
+/// Render the configured sample interval compactly: `1s`, `1.5s`, `250ms`.
+fn fmt_rate(tick_ms: u64) -> String {
+    if tick_ms >= 1000 {
+        if tick_ms.is_multiple_of(1000) {
+            format!("{}s", tick_ms / 1000)
+        } else {
+            format!("{:.1}s", tick_ms as f32 / 1000.0)
+        }
+    } else {
+        format!("{}ms", tick_ms)
+    }
+}
+
+pub fn draw_header(
+    f: &mut Frame,
+    area: Rect,
+    snap: &Snapshot,
+    live: LiveState,
+    recording: bool,
+    tick_ms: u64,
+) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(
         " \u{25cf}",
@@ -73,8 +93,20 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState, 
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    // Refresh rate sits between the live badge and the clock so the user can
+    // always see how fast the dashboard is sampling (issue #14).
     right_spans.push(Span::styled(
-        format!("\u{25cf} {}  {}", label, ts.format("%H:%M:%S")),
+        format!("\u{25cf} {}  ", label),
+        Style::default()
+            .fg(right_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    right_spans.push(Span::styled(
+        format!("\u{27f3} {}  ", fmt_rate(tick_ms)),
+        Style::default().fg(p::text_muted()),
+    ));
+    right_spans.push(Span::styled(
+        ts.format("%H:%M:%S").to_string(),
         Style::default()
             .fg(right_color)
             .add_modifier(Modifier::BOLD),
@@ -92,7 +124,9 @@ pub fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, live: LiveState, 
     let right_area = Rect {
         x: area.x + area.width.saturating_sub(right_w),
         y: area.y,
-        width: right_w,
+        // Clamp to the buffer: on very narrow terminals right_w can exceed
+        // area.width, which would otherwise index past the buffer edge.
+        width: right_w.min(area.width),
         height: 1,
     };
 
@@ -332,5 +366,13 @@ mod tests {
         // Single-digit hours/minutes must zero-pad so column alignment
         // doesn't shift across ticks in the header.
         assert_eq!(format_uptime(3600), "01:00:00");
+    }
+
+    #[test]
+    fn fmt_rate_formats_sub_second_and_whole_and_fractional() {
+        assert_eq!(fmt_rate(250), "250ms");
+        assert_eq!(fmt_rate(1000), "1s");
+        assert_eq!(fmt_rate(2000), "2s");
+        assert_eq!(fmt_rate(1500), "1.5s");
     }
 }

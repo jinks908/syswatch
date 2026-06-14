@@ -104,6 +104,10 @@ const GROUPS: &[Group] = &[
                 keys: "/",
                 label: "Filter procs (Esc cancel, Enter apply)",
             },
+            Row {
+                keys: "d",
+                label: "Toggle drill-in detail pane (more list rows)",
+            },
         ],
     },
     Group {

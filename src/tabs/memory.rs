@@ -14,18 +14,29 @@ use crate::ui::{
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let v = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    draw_ram_bar(f, v[0], snap, app.graph_style);
-    draw_swap(f, v[1], snap, app.graph_style);
-    draw_proc_breakdown(f, v[2], app, snap);
+    // Drop the SWAP panel entirely when no swap is configured — those 7 rows
+    // go to the process list instead (issue #12).
+    let has_swap = snap.mem.swap_total_bytes > 0;
+    if has_swap {
+        let v = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        draw_ram_bar(f, v[0], snap, app.graph_style);
+        draw_swap(f, v[1], snap, app.graph_style);
+        draw_proc_breakdown(f, v[2], app, snap);
+    } else {
+        let v = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(7), Constraint::Min(0)])
+            .split(area);
+        draw_ram_bar(f, v[0], snap, app.graph_style);
+        draw_proc_breakdown(f, v[1], app, snap);
+    }
 }
 
 fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
@@ -171,7 +182,8 @@ fn draw_proc_breakdown(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let mut header: Vec<Span> = vec![
         Span::styled(format!("{:>7} ", "PID"), header_style),
         Span::styled(format!("{:<10} ", "USER"), header_style),
-        Span::styled(format!("{:>6} ", "%MEM"), header_style),
+        // Width 5 to match the `{:>5.1}` data cell — see issue #11.
+        Span::styled(format!("{:>5} ", "%MEM"), header_style),
     ];
     if show_footprint {
         header.push(Span::styled(format!("{:>10} ", "FOOTPRNT"), header_style));

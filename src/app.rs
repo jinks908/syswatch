@@ -32,6 +32,9 @@ pub struct Options {
     pub replay: Option<Vec<Snapshot>>,
 }
 
+/// Number of CPU-usage samples kept per process for the inline Procs sparkline.
+pub const PROC_CPU_SPARK_LEN: usize = 8;
+
 pub struct History {
     /// Aggregate CPU usage % (0..100), one sample per tick.
     pub cpu: Ring<f32>,
@@ -64,6 +67,10 @@ pub struct History {
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
     pub proc_cpu_ewma: HashMap<u32, f32>,
+    /// Per-pid short CPU-usage history (0..1, raw cpu_pct/100) for the
+    /// btop-style inline sparkline in the Procs tab (issue #10). Bounded to
+    /// `PROC_CPU_SPARK_LEN` samples each; pruned to live pids every tick.
+    pub proc_cpu_history: HashMap<u32, Ring<f32>>,
     /// Per-pid billed-power EWMA (macOS) — smooths the 2s sampler so
     /// the energy-hog insight doesn't fire on one busy window.
     pub proc_power_ewma: HashMap<u32, f32>,
@@ -92,6 +99,7 @@ impl History {
             gpu_util_by_name: HashMap::new(),
             gpu_vram_by_name: HashMap::new(),
             proc_cpu_ewma: HashMap::new(),
+            proc_cpu_history: HashMap::new(),
             proc_power_ewma: HashMap::new(),
             proc_mem_track: HashMap::new(),
             session: Ring::new(cap),
@@ -169,6 +177,20 @@ impl History {
             next.insert(proc_.pid, ewma);
         }
         self.proc_cpu_ewma = next;
+
+        // Per-pid CPU-usage history for the Procs sparkline (issue #10).
+        // Move existing rings forward, append this tick's raw sample
+        // (cpu_pct/100, clamped), and drop rings for pids that have exited.
+        let mut next_hist: HashMap<u32, Ring<f32>> = HashMap::with_capacity(snap.procs.len());
+        for proc_ in &snap.procs {
+            let mut ring = self
+                .proc_cpu_history
+                .remove(&proc_.pid)
+                .unwrap_or_else(|| Ring::new(PROC_CPU_SPARK_LEN));
+            ring.push((proc_.cpu_pct / 100.0).clamp(0.0, 1.0));
+            next_hist.insert(proc_.pid, ring);
+        }
+        self.proc_cpu_history = next_hist;
 
         // Billed-power EWMA, same alpha and same prune-to-live rule.
         let mut next_power: HashMap<u32, f32> = HashMap::new();
@@ -369,6 +391,10 @@ pub struct App {
     pub snap: Option<Snapshot>,
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
+    /// Whether the Procs tab shows its drill-in detail pane (which carries the
+    /// selected process's started date and other per-proc detail). Toggled
+    /// with `d`; off reclaims those rows for the process list (issue #13).
+    pub proc_show_detail: bool,
     pub service_sort: ServiceSort,
     pub service_sel: usize,
     pub insights: Vec<Insight>,
@@ -475,6 +501,7 @@ impl App {
             snap: None,
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
+            proc_show_detail: true,
             service_sort: ServiceSort::Name,
             service_sel: 0,
             insights: Vec::new(),
@@ -663,6 +690,11 @@ impl App {
                 // applied filter (if any) so the user can refine it.
                 self.proc_filter_input = true;
                 self.proc_filter_buf = self.proc_filter_active.clone().unwrap_or_default();
+            }
+            (KeyCode::Char('d'), _) if self.active == TabId::Procs => {
+                // Collapse/expand the drill-in detail pane to trade detail
+                // (incl. the started date) for more process rows (issue #13).
+                self.proc_show_detail = !self.proc_show_detail;
             }
             (KeyCode::Up, _) if self.active == TabId::Services => {
                 self.service_sel = self.service_sel.saturating_sub(1);
@@ -936,7 +968,14 @@ fn draw(f: &mut ratatui::Frame, app: &App, snap: &Snapshot) {
         ])
         .split(area);
 
-    chrome::draw_header(f, chunks[0], snap, app.live_state(), app.recorder.is_some());
+    chrome::draw_header(
+        f,
+        chunks[0],
+        snap,
+        app.live_state(),
+        app.recorder.is_some(),
+        app.user_config.tick_ms,
+    );
     let active_insights = app
         .insights
         .iter()
@@ -1033,6 +1072,48 @@ mod tests {
         h.push(&snap_with(vec![proc(1, 50.0)]));
         assert!(h.proc_cpu_ewma.contains_key(&1));
         assert!(!h.proc_cpu_ewma.contains_key(&2));
+    }
+
+    // ── per-pid CPU history sparkline (issue #10) ───────────────────────
+
+    #[test]
+    fn cpu_history_records_normalized_samples() {
+        let mut h = History::new(10);
+        h.push(&snap_with(vec![proc(1, 50.0)]));
+        h.push(&snap_with(vec![proc(1, 100.0)]));
+        let ring = h.proc_cpu_history.get(&1).expect("history for pid 1");
+        // cpu_pct/100, oldest→newest.
+        assert_eq!(ring.to_vec(), vec![0.5, 1.0]);
+    }
+
+    #[test]
+    fn cpu_history_clamps_above_100pct() {
+        // Multi-core aggregate cpu_pct can exceed 100; sparkline samples
+        // are clamped into 0..1 so the glyph mapping stays in range.
+        let mut h = History::new(10);
+        h.push(&snap_with(vec![proc(1, 350.0)]));
+        assert_eq!(h.proc_cpu_history.get(&1).unwrap().to_vec(), vec![1.0]);
+    }
+
+    #[test]
+    fn cpu_history_is_bounded_to_spark_len() {
+        let mut h = History::new(10);
+        for _ in 0..(PROC_CPU_SPARK_LEN + 5) {
+            h.push(&snap_with(vec![proc(1, 10.0)]));
+        }
+        assert_eq!(
+            h.proc_cpu_history.get(&1).unwrap().len(),
+            PROC_CPU_SPARK_LEN
+        );
+    }
+
+    #[test]
+    fn cpu_history_prunes_dead_pids() {
+        let mut h = History::new(10);
+        h.push(&snap_with(vec![proc(1, 10.0), proc(2, 10.0)]));
+        h.push(&snap_with(vec![proc(1, 10.0)]));
+        assert!(h.proc_cpu_history.contains_key(&1));
+        assert!(!h.proc_cpu_history.contains_key(&2));
     }
 
     #[test]
