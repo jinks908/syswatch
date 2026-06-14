@@ -201,10 +201,13 @@ fn insight_runaway_proc(h: &History, snap: &Snapshot) -> Option<Insight> {
 
 /// Most-full mount above the warn/crit threshold.
 fn insight_disk_full(snap: &Snapshot) -> Option<Insight> {
+    // Skip read-only mounts: composefs/overlay roots on immutable distros
+    // (Fedora Atomic, ostree), squashfs, iso9660, etc. report 100% full by
+    // design and can never be cleared, so warning about them is noise (#9).
     let worst = snap
         .disks
         .iter()
-        .filter(|d| d.total_bytes > 0)
+        .filter(|d| d.total_bytes > 0 && !d.read_only)
         .max_by(|a, b| {
             a.usage_pct
                 .partial_cmp(&b.usage_pct)
@@ -217,7 +220,11 @@ fn insight_disk_full(snap: &Snapshot) -> Option<Insight> {
     } else {
         return None;
     };
-    let warn_count = snap.disks.iter().filter(|d| d.usage_pct >= 85.0).count();
+    let warn_count = snap
+        .disks
+        .iter()
+        .filter(|d| d.usage_pct >= 85.0 && !d.read_only)
+        .count();
     Some(Insight {
         severity,
         title: format!(
@@ -647,6 +654,16 @@ mod tests {
             used_bytes: ((used_pct / 100.0) * 100.0 * GIB as f32) as u64,
             available_bytes: ((1.0 - used_pct / 100.0) * 100.0 * GIB as f32) as u64,
             usage_pct: used_pct,
+            read_only: false,
+        }
+    }
+
+    /// A read-only mount (composefs/overlay root, squashfs, …) at `used_pct`.
+    fn disk_ro(mount: &str, fs_type: &str, used_pct: f32) -> DiskUsageTick {
+        DiskUsageTick {
+            fs_type: fs_type.into(),
+            read_only: true,
+            ..disk(mount, used_pct)
         }
     }
 
@@ -800,6 +817,43 @@ mod tests {
         let result = compute(&h, &s);
         let ins = first_with(&result, "full").expect("disk full insight expected");
         assert_eq!(ins.severity, Severity::Crit);
+    }
+
+    #[test]
+    fn disk_full_ignores_readonly_composefs_root() {
+        // Fedora Atomic / ostree roots are read-only composefs (fstype
+        // `overlay`) reported at 100% full — must not warn (issue #9).
+        let h = empty_history();
+        let s = snap(
+            MemTick::default(),
+            vec![],
+            vec![disk_ro("/", "overlay", 100.0)],
+        );
+        let result = compute(&h, &s);
+        assert!(
+            first_with(&result, "full").is_none(),
+            "read-only composefs root should not raise a disk-full insight"
+        );
+    }
+
+    #[test]
+    fn disk_full_picks_writable_mount_over_full_readonly_root() {
+        // A full read-only root must be skipped in favor of the genuinely
+        // actionable writable mount, not merely suppressed.
+        let h = empty_history();
+        let s = snap(
+            MemTick::default(),
+            vec![],
+            vec![disk_ro("/", "overlay", 100.0), disk("/var", 91.0)],
+        );
+        let result = compute(&h, &s);
+        let ins = first_with(&result, "full").expect("writable mount should warn");
+        assert_eq!(ins.severity, Severity::Warn);
+        assert!(
+            ins.title.contains("/var"),
+            "insight should target the writable mount, got: {}",
+            ins.title
+        );
     }
 
     // ── memory_pressure ──────────────────────────────────────────────────

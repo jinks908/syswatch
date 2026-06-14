@@ -41,6 +41,12 @@ pub struct DiskUsageTick {
     pub used_bytes: u64,
     pub available_bytes: u64,
     pub usage_pct: f32,
+    /// Mounted read-only (e.g. composefs/overlay roots on immutable distros,
+    /// squashfs, iso9660). A read-only filesystem at 100% is normal and
+    /// unactionable, so capacity warnings skip it (issue #9). `#[serde(default)]`
+    /// keeps older snapshots deserializing.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

@@ -293,6 +293,7 @@ impl Collector {
                 used_bytes: used,
                 available_bytes: avail,
                 usage_pct: pct * 100.0,
+                read_only: d.is_read_only(),
             });
         }
 
