@@ -14,13 +14,18 @@ use crate::ui::{
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    // The drill-in pane is toggleable (`d`); hidden, its 9 rows go to the
+    // process list (issue #13).
+    let mut constraints = vec![
+        Constraint::Length(1), // sort strip / filter input
+        Constraint::Min(0),    // process table
+    ];
+    if app.proc_show_detail {
+        constraints.push(Constraint::Length(9)); // drill-in
+    }
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // sort strip / filter input
-            Constraint::Min(0),    // process table
-            Constraint::Length(9), // drill-in
-        ])
+        .constraints(constraints)
         .split(area);
 
     draw_sort_strip(f, v[0], app, snap);
@@ -31,7 +36,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     );
     let total_mem = snap.mem.total_bytes.max(1);
     draw_table(f, v[1], app, &view, total_mem, snap.net_rates_estimated);
-    draw_drill_in(f, v[2], &view, app.proc_sel, total_mem);
+    if app.proc_show_detail {
+        draw_drill_in(f, v[2], &view, app.proc_sel, total_mem);
+    }
 }
 
 /// Filter then sort the proc list. `filter` is a case-insensitive
@@ -141,14 +148,14 @@ fn draw_sort_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let count_text = if let Some(f) = app.proc_filter_active.as_deref() {
         let visible = filtered_sorted(&snap.procs, app.proc_sort, Some(f)).len();
         format!(
-            "    {}/{} procs  filter: \"{}\"   /:edit  s:sort  ↑↓:select",
+            "    {}/{} procs  filter: \"{}\"   /:edit  s:sort  d:detail  ↑↓:select",
             visible,
             snap.procs.len(),
             f
         )
     } else {
         format!(
-            "    {} procs   /:filter  s:sort  ↑↓:select",
+            "    {} procs   /:filter  s:sort  d:detail  ↑↓:select",
             snap.procs.len()
         )
     };
@@ -184,8 +191,12 @@ fn draw_table(
         Span::styled(format!("{:>7} ", "PID"), header_style()),
         Span::styled(format!("{:>7} ", "PPID"), header_style()),
         Span::styled(format!("{:<14} ", "USER"), header_style()),
-        Span::styled(format!("{:>6} ", "%CPU"), header_style()),
-        Span::styled(format!("{:>6} ", "%MEM"), header_style()),
+        // Width 5 to match the `{:>5.1}` data cells below — a width-6 header
+        // here drifted every column after USER one cell right (issue #11).
+        Span::styled(format!("{:>5} ", "%CPU"), header_style()),
+        // Inline CPU-usage history, btop-style (issue #10).
+        Span::styled(format!("{:<8} ", "CPU HIST"), header_style()),
+        Span::styled(format!("{:>5} ", "%MEM"), header_style()),
     ];
     // VIRT only when neither extras are shown — keeps the row from
     // sprawling past 120 cols when both NET and GPU are populated.
@@ -266,6 +277,10 @@ fn draw_table(
             Span::styled(
                 format!("{:>5.1} ", proc_.cpu_pct),
                 Style::default().fg(cpu_color).bg(row_bg),
+            ),
+            Span::styled(
+                format!("{} ", cpu_spark(app, proc_.pid)),
+                Style::default().fg(p::brand()).bg(row_bg),
             ),
             Span::styled(
                 format!("{:>5.1} ", mem_pct(proc_.mem_rss, total_mem)),
@@ -475,10 +490,27 @@ fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
     filtered_sorted(procs, key, None)
 }
 
+/// 8-cell CPU-usage sparkline for `pid`, right-aligned (newest sample at the
+/// right) and left-padded with spaces while the per-pid history is still
+/// filling. Empty (all spaces) for pids with no recorded history yet — e.g.
+/// while scrubbing a past snapshot whose pids have since exited (issue #10).
+fn cpu_spark(app: &App, pid: u32) -> String {
+    let width = crate::app::PROC_CPU_SPARK_LEN;
+    let samples = app
+        .history
+        .proc_cpu_history
+        .get(&pid)
+        .map(|r| r.to_vec())
+        .unwrap_or_default();
+    let glyphs = crate::ui::widgets::sparkline_string(&samples, app.graph_style);
+    let pad = width.saturating_sub(samples.len());
+    format!("{}{}", " ".repeat(pad), glyphs)
+}
+
 fn fill(width: usize, used: &str, show_net: bool, show_gpu: bool) -> String {
-    // Fixed: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + %MEM 5+1
+    // Fixed: PID 7+1 + PPID 7+1 + USER 14+1 + %CPU 5+1 + CPU HIST 8+1 + %MEM 5+1
     //        STATE 5+1 + R/s 10+1 + W/s 10+1
-    let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 5 + 1 + 5 + 1 + 10 + 1 + 10 + 1;
+    let base = 7 + 1 + 7 + 1 + 14 + 1 + 5 + 1 + 8 + 1 + 5 + 1 + 5 + 1 + 10 + 1 + 10 + 1;
     let virt_w = if !show_net && !show_gpu { 9 + 1 } else { 0 };
     let net_w = if show_net { 10 + 1 + 10 + 1 } else { 0 };
     let gpu_w = if show_gpu { 5 + 1 + 9 + 1 } else { 0 };
