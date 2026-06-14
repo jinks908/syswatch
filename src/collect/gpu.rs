@@ -112,12 +112,25 @@ const HINT_LINUX_INTEL: &str =
 pub struct GpuDiscovery {
     /// Cached at startup (subprocess on macOS is too slow to poll).
     pub devices: Vec<GpuTick>,
+    /// Parallel to `devices`: the real DRM `cardN` index per device on Linux
+    /// (`None` where there's no stable sysfs mapping, e.g. nvml NVIDIA
+    /// entries). Empty on other platforms. `refresh()` reads
+    /// `/sys/class/drm/cardN` live metrics by this true card number rather
+    /// than the device's position in the list, which mismatches on
+    /// hybrid/multi-GPU hosts where the discrete GPU isn't `card0` (issue #15).
+    #[allow(dead_code)]
+    card_indices: Vec<Option<u32>>,
 }
 
 impl GpuDiscovery {
     pub fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        let (devices, card_indices) = discover_linux();
+        #[cfg(not(target_os = "linux"))]
+        let (devices, card_indices) = (discover(), Vec::new());
         Self {
-            devices: discover(),
+            devices,
+            card_indices,
         }
     }
 
@@ -167,16 +180,23 @@ impl GpuDiscovery {
         #[cfg(all(target_os = "linux", feature = "gpu-nvidia"))]
         nvidia::refresh(&mut out);
 
+        // Read live metrics by each device's *real* DRM card number, not its
+        // position in the list. On hybrid/multi-GPU hosts the discrete GPU is
+        // often card1 while card0 is the iGPU (or absent from the list), so a
+        // positional index reads the wrong (or a nonexistent) card and live
+        // telemetry comes back blank (issue #15).
         #[cfg(target_os = "linux")]
-        for (i, dev) in out.iter_mut().enumerate() {
+        for (dev, card_index) in out.iter_mut().zip(self.card_indices.iter()) {
+            let Some(card_idx) = card_index.map(|n| n as usize) else {
+                continue; // no stable sysfs card (e.g. nvml NVIDIA) — skip
+            };
             // gpu_busy_percent: AMDGPU + recent i915/xe both expose it.
-            if let Some(util) = read_linux_busy_percent(i) {
+            if let Some(util) = read_linux_busy_percent(card_idx) {
                 dev.util_pct = Some(util);
                 dev.live_data_hint = None;
             }
             if dev.vendor == "AMD" {
-                let device_path =
-                    std::path::PathBuf::from(format!("/sys/class/drm/card{}/device", i));
+                let device_path = amd_device_path(card_idx);
                 if let Some(used) = read_amdgpu_vram_bytes(&device_path.join("mem_info_vram_used"))
                 {
                     dev.vram_used_bytes = Some(used);
@@ -395,13 +415,15 @@ fn apply_perf_stats(stats: &mut MacGpuStats, body: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn discover() -> Vec<GpuTick> {
+fn discover_linux() -> (Vec<GpuTick>, Vec<Option<u32>>) {
     use std::fs;
     let mut out = Vec::new();
+    // Parallel to `out`: the real DRM `cardN` number for each device, so
+    // refresh() reads live metrics from the correct card (issue #15).
+    let mut card_idx: Vec<Option<u32>> = Vec::new();
     let Ok(entries) = fs::read_dir("/sys/class/drm") else {
-        return out;
+        return (out, card_idx);
     };
-    // Sort so the per-card index used by refresh() matches discovery order.
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -411,6 +433,10 @@ fn discover() -> Vec<GpuTick> {
         if !name_str.starts_with("card") || name_str.contains('-') {
             continue;
         }
+        // Capture the true card number (card1 != position 0 on hybrid GPUs).
+        let Some(card_number) = parse_card_index(&name_str) else {
+            continue;
+        };
         let card_path = entry.path();
         let device_path = card_path.join("device");
         let vendor_id = fs::read_to_string(device_path.join("vendor"))
@@ -462,20 +488,35 @@ fn discover() -> Vec<GpuTick> {
             live_data_hint,
             last_submitter_pid: None,
         });
+        card_idx.push(Some(card_number));
     }
     // Replace the PCI-ID-only NVIDIA stubs with rich nvml-derived entries
     // when the feature is on and nvml init succeeds. nvml output supersedes
     // sysfs entirely for NVIDIA — no stable mapping between sysfs cardN and
-    // nvml index is exposed.
+    // nvml index is exposed. Drop the stubs and their card indices together so
+    // `out` and `card_idx` stay aligned, then append nvml entries with no
+    // sysfs card (`None`) — refresh() skips those and lets nvml drive them.
     #[cfg(feature = "gpu-nvidia")]
     {
         let nv = nvidia::discover();
         if !nv.is_empty() {
-            out.retain(|g| g.vendor != "NVIDIA");
-            out.extend(nv);
+            let mut kept_dev = Vec::with_capacity(out.len());
+            let mut kept_idx = Vec::with_capacity(card_idx.len());
+            for (dev, idx) in out.into_iter().zip(card_idx) {
+                if dev.vendor != "NVIDIA" {
+                    kept_dev.push(dev);
+                    kept_idx.push(idx);
+                }
+            }
+            for dev in nv {
+                kept_dev.push(dev);
+                kept_idx.push(None);
+            }
+            out = kept_dev;
+            card_idx = kept_idx;
         }
     }
-    out
+    (out, card_idx)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -488,6 +529,22 @@ fn read_linux_busy_percent(card_idx: usize) -> Option<f32> {
     let path = format!("/sys/class/drm/card{}/device/gpu_busy_percent", card_idx);
     let s = std::fs::read_to_string(path).ok()?;
     s.trim().parse::<f32>().ok()
+}
+
+/// Parse the DRM card number out of a `/sys/class/drm` entry name.
+/// `"card0" -> 0`, `"card12" -> 12`. Connector nodes (`"card0-HDMI-A-1"`)
+/// and render nodes (`"renderD128"`) return `None`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_card_index(name: &str) -> Option<u32> {
+    name.strip_prefix("card")?.parse::<u32>().ok()
+}
+
+/// sysfs device directory for a given DRM card number. Centralized so the
+/// card-number → path mapping is exercised by tests (issue #15: this must
+/// follow the device's real card, not its position in the discovery list).
+#[cfg(any(target_os = "linux", test))]
+fn amd_device_path(card_idx: usize) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/sys/class/drm/card{}/device", card_idx))
 }
 
 // ── AMDGPU sysfs helpers (linux | test for fixture-driven tests) ────────
@@ -711,6 +768,41 @@ mod tests {
         assert_eq!(stats[0].device_util_pct as i32, 42);
         assert_eq!(stats[0].renderer_util_pct, 0.0);
         assert_eq!(stats[0].in_use_system_memory, 0);
+    }
+
+    // ── DRM card-number mapping (issue #15) ── host-agnostic ──────────────
+
+    use super::{amd_device_path, parse_card_index};
+
+    #[test]
+    fn parses_card_number_from_drm_entry() {
+        assert_eq!(parse_card_index("card0"), Some(0));
+        assert_eq!(parse_card_index("card1"), Some(1));
+        assert_eq!(parse_card_index("card12"), Some(12));
+    }
+
+    #[test]
+    fn rejects_connector_and_render_nodes() {
+        // Connector nodes and render nodes must not be read as cards.
+        assert_eq!(parse_card_index("card0-HDMI-A-1"), None);
+        assert_eq!(parse_card_index("card1-DP-2"), None);
+        assert_eq!(parse_card_index("renderD128"), None);
+        assert_eq!(parse_card_index("card"), None);
+        assert_eq!(parse_card_index("controlD64"), None);
+    }
+
+    #[test]
+    fn device_path_follows_the_real_card_number() {
+        // The discrete GPU on a hybrid host is card1, not the position-0
+        // card0 — the live-metrics path must address card1 (issue #15).
+        assert_eq!(
+            amd_device_path(1),
+            std::path::PathBuf::from("/sys/class/drm/card1/device")
+        );
+        assert_eq!(
+            amd_device_path(0),
+            std::path::PathBuf::from("/sys/class/drm/card0/device")
+        );
     }
 
     // ── AMDGPU sysfs helpers ── exercised on any host via tempfile ────────
