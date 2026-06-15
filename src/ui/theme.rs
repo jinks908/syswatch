@@ -69,27 +69,27 @@ pub const fn dark() -> Theme {
     // status_info shares brand (as it does in netwatch's dark).
     Theme {
         name: "dark",
-        brand: Color::Rgb(0x5f, 0xdc, 0xff),
-        active_tab: Color::Rgb(0x5f, 0xdc, 0xff),
-        inactive_tab: Color::Rgb(0xc5, 0xd1, 0xd6),
-        border: Color::Rgb(0x44, 0x56, 0x60),
-        separator: Color::Rgb(0x44, 0x56, 0x60),
-        text_primary: Color::Rgb(0xc5, 0xd1, 0xd6),
-        text_secondary: Color::Rgb(0xa0, 0xb0, 0xb6),
-        text_muted: Color::Rgb(0x6b, 0x80, 0x88),
-        text_inverse: Color::Rgb(0x0c, 0x14, 0x18),
-        status_good: Color::Rgb(0x5c, 0xd9, 0x89),
-        status_warn: Color::Rgb(0xf0, 0xc0, 0x60),
-        status_error: Color::Rgb(0xff, 0x78, 0x78),
-        status_info: Color::Rgb(0x5f, 0xdc, 0xff),
-        rx_rate: Color::Rgb(0x5c, 0xd9, 0x89),
-        tx_rate: Color::Rgb(0xd9, 0x7a, 0xff),
-        key_hint: Color::Rgb(0x5f, 0xdc, 0xff),
-        selection_bg: Color::Rgb(0x1a, 0x33, 0x40),
-        highlight_bg: Color::Rgb(0x2a, 0x4a, 0x5a),
-        bg: Color::Rgb(0x0c, 0x14, 0x18),
-        warn_bg: Color::Rgb(0x3a, 0x2c, 0x14),
-        err_bg: Color::Rgb(0x3a, 0x1c, 0x1c),
+        brand: Color::Rgb(0x2f, 0xe1, 0xc8),           // #2fe1c8
+        active_tab: Color::Rgb(0x00, 0xae, 0xff),      // #00aeff
+        inactive_tab: Color::Rgb(0xc0, 0xca, 0xf5),    // #c0caf5
+        border: Color::Rgb(0x58, 0x6e, 0x98),          // #586e98
+        separator: Color::Rgb(0x58, 0x6e, 0x98),       // #586e98
+        text_primary: Color::Rgb(0xc0, 0xca, 0xf5),    // #c0caf5
+        text_secondary: Color::Rgb(0xd2, 0x5c, 0xa4),  // #d25ca4
+        text_muted: Color::Rgb(0x72, 0x99, 0xc0),      // #7299c0
+        text_inverse: Color::Rgb(0x0c, 0x14, 0x18),    // #0c1418
+        status_good: Color::Rgb(0xa6, 0xe8, 0x7d),     // #a6e87d
+        status_warn: Color::Rgb(0xf6, 0xbe, 0x55),     // #f6be55
+        status_error: Color::Rgb(0xff, 0x66, 0x8c),    // #ff668c
+        status_info: Color::Rgb(0x00, 0xae, 0xff),     // #00aeff
+        rx_rate: Color::Rgb(0xa6, 0xe8, 0x7d),         // #a6e87d
+        tx_rate: Color::Rgb(0xbe, 0x86, 0xf7),         // #be86f7
+        key_hint: Color::Rgb(0xff, 0x66, 0x8c),        // #ff668c
+        selection_bg: Color::Rgb(0x1a, 0x33, 0x40),    // #1a3340
+        highlight_bg: Color::Rgb(0x2a, 0x4a, 0x5a),    // #2a4a5a
+        bg: Color::Rgb(0x05, 0x16, 0x26),              // #051626
+        warn_bg: Color::Rgb(0x3a, 0x2c, 0x14),         // #3a2c14
+        err_bg: Color::Rgb(0x3a, 0x1c, 0x1c),          // #3a1c1c
     }
 }
 
